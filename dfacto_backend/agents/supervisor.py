@@ -39,10 +39,11 @@ MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.70"))
 def node_extract(state: GraphState) -> dict:
     """Agent 1 — transcribe audio and extract core claim."""
     result = extract_claim(state.audio_chunk)
-    logger.info("Extracted claim: %r", result.get("core_claim"))
+    claim = result.get("core_claim", "")
+    logger.info("Extracted claim: %r", claim if claim else "<none>")
     return {
         "transcript": result["transcript"],
-        "core_claim": result["core_claim"],
+        "core_claim": claim,
     }
 
 
@@ -54,7 +55,11 @@ _CATEGORY_KEYWORDS = {
 
 
 def node_categorize(state: GraphState) -> dict:
-    """Simple keyword-based claim categorisation."""
+    """Keyword-based claim categorisation. Short-circuits if no claim found."""
+    if not state.core_claim.strip():
+        # No claim — mark as unknown and skip to synthesize via route
+        logger.info("No claim found — skipping workers.")
+        return {"category": "none", "confidence": 0.0, "verdict": "UNKNOWN"}
     claim_lower = state.core_claim.lower()
     for category, keywords in _CATEGORY_KEYWORDS.items():
         if any(kw in claim_lower for kw in keywords):
@@ -160,9 +165,11 @@ def node_synthesize(state: GraphState) -> dict:
 def route_after_aggregate(state: GraphState) -> Literal["increment_depth", "synthesize"]:
     """
     Route to recursion (via increment_depth node) or synthesis.
-    NOTE: depth increment MUST happen in a node (not here) so LangGraph
-          persists the updated value in state.
+    Also short-circuits if there was no claim.
     """
+    # Short-circuit: no claim, nothing to do
+    if not state.core_claim.strip():
+        return "synthesize"
     if state.confidence < MIN_CONFIDENCE and state.depth < MAX_DEPTH:
         return "increment_depth"
     return "synthesize"
@@ -170,18 +177,23 @@ def route_after_aggregate(state: GraphState) -> Literal["increment_depth", "synt
 
 # ── Graph construction ─────────────────────────────────────────────────────────
 
-def _build_graph() -> StateGraph:
+def _build_graph(start_at_extract: bool = True) -> StateGraph:
     builder = StateGraph(GraphState)
 
-    builder.add_node("extract", node_extract)
+    if start_at_extract:
+        builder.add_node("extract", node_extract)
     builder.add_node("categorize", node_categorize)
     builder.add_node("fan_out", node_fan_out)
     builder.add_node("aggregate", node_aggregate)
     builder.add_node("increment_depth", node_increment_depth)
     builder.add_node("synthesize", node_synthesize)
 
-    builder.set_entry_point("extract")
-    builder.add_edge("extract", "categorize")
+    if start_at_extract:
+        builder.set_entry_point("extract")
+        builder.add_edge("extract", "categorize")
+    else:
+        builder.set_entry_point("categorize")
+
     builder.add_edge("categorize", "fan_out")
     builder.add_edge("fan_out", "aggregate")
     builder.add_conditional_edges(
@@ -189,34 +201,52 @@ def _build_graph() -> StateGraph:
         route_after_aggregate,
         {"increment_depth": "increment_depth", "synthesize": "synthesize"},
     )
-    # After incrementing depth, loop back to fan_out for deeper search
     builder.add_edge("increment_depth", "fan_out")
     builder.add_edge("synthesize", END)
 
     return builder.compile()
 
 
-_graph = _build_graph()
+# Full pipeline (audio → extract → categorize → … → synthesize)
+_graph = _build_graph(start_at_extract=True)
+
+# Text-injection pipeline (claim → categorize → … → synthesize), skips Gemini
+_claims_graph = _build_graph(start_at_extract=False)
 
 
-# ── Public entry point ─────────────────────────────────────────────────────────
+# ── Public API ─────────────────────────────────────────────────────────────────
 
 def run_pipeline(audio_chunk: bytes) -> dict | None:
-    """
-    Run the full LangGraph pipeline for a single audio buffer.
-    Returns a dict matching Flutter's FactCheckResult.fromJson schema,
-    or None if no claim was found in the audio.
-    """
+    """Run the full pipeline from raw PCM audio bytes."""
     initial_state = GraphState(audio_chunk=audio_chunk)
-    # LangGraph returns the final state as a plain dict when using Pydantic models
     final: dict = _graph.invoke(initial_state)
+    return _format_result(final)
 
+
+def run_pipeline_from_claim(claim_text: str) -> dict | None:
+    """
+    Bypass Gemini audio transcription and inject a plain-text claim directly.
+    Used by POST /debug/check for testing without a microphone.
+    """
+    if not claim_text.strip():
+        return None
+    logger.info("Debug injection — claim: %r", claim_text)
+    initial_state = GraphState(
+        audio_chunk=b"",
+        transcript=claim_text,
+        core_claim=claim_text,
+    )
+    final: dict = _claims_graph.invoke(initial_state)
+    return _format_result(final)
+
+
+def _format_result(final: dict) -> dict | None:
+    """Convert LangGraph output dict to Flutter FactCheckResult-compatible payload."""
     core_claim = final.get("core_claim", "")
     if not core_claim:
         logger.info("No claim detected — skipping result.")
         return None
 
-    # Map verdict string to Flutter's ClaimVeracity enum names
     verdict = final.get("verdict", "UNKNOWN")
     veracity_map = {
         "TRUE": "trueVerdict",
@@ -224,12 +254,10 @@ def run_pipeline(audio_chunk: bytes) -> dict | None:
         "MIXED": "mixed",
         "UNKNOWN": "unknown",
     }
-    claim_veracity = veracity_map.get(verdict, "unknown")
-
     return {
         "id": str(uuid.uuid4()),
         "claimText": core_claim,
-        "claimVeracity": claim_veracity,
+        "claimVeracity": veracity_map.get(verdict, "unknown"),
         "confidenceScore": round(final.get("confidence", 0.0), 3),
         "summaryAndExplanation": final.get("summary", ""),
         "keySource": final.get("source_url"),

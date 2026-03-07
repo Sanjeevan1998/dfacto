@@ -2,10 +2,11 @@
 WebSocket router for the Live Audit pipeline.
 
 Route: WS /ws/live-audit
-- Accepts binary PCM audio frames streamed from the Flutter app.
-- Buffers chunks until a minimum window is reached.
-- Passes the buffer to the LangGraph supervisor pipeline.
-- Sends back a JSON FactCheckResult payload per detected claim.
+- Accepts binary PCM audio frames streaming from the Flutter app.
+- Buffers chunks until a 3-second window is reached.
+- Phase 1: Runs Gemini transcription → immediately sends {"type":"transcript"} message.
+- Phase 2: Runs LangGraph workers → sends {"type":"result"} message with fact-check verdict.
+- Continues listening immediately for the next audio buffer.
 """
 
 from __future__ import annotations
@@ -16,7 +17,8 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from agents.supervisor import run_pipeline
+from agents.agent1_extractor import extract_claim
+from agents.supervisor import run_pipeline_from_claim
 
 logger = logging.getLogger("dfacto.live_audit")
 
@@ -41,16 +43,31 @@ async def live_audit_ws(websocket: WebSocket):
                 chunk = bytes(buffer[:_BUFFER_TARGET_BYTES])
                 buffer = buffer[_BUFFER_TARGET_BYTES:]
 
-                # Run the LangGraph pipeline off-thread (non-blocking)
-                result = await asyncio.to_thread(run_pipeline, chunk)
+                # ── Phase 1: Transcribe immediately ──────────────────────────
+                extraction = await asyncio.to_thread(extract_claim, chunk)
+                transcript = extraction.get("transcript", "").strip()
+                core_claim = extraction.get("core_claim", "").strip()
 
-                if result:
-                    await websocket.send_text(json.dumps(result))
-                    logger.info(
-                        "Sent fact-check result: verdict=%s confidence=%.2f",
-                        result.get("verdict"),
-                        result.get("confidenceScore", 0.0),
-                    )
+                if transcript:
+                    # Send transcript text immediately so UI can show it
+                    await websocket.send_text(json.dumps({
+                        "type": "transcript",
+                        "text": transcript,
+                        "claim": core_claim,
+                    }))
+                    logger.info("Transcript sent: %r (claim: %r)", transcript[:80], core_claim)
+
+                # ── Phase 2: Fact-check if a claim was found ──────────────────
+                if core_claim:
+                    result = await asyncio.to_thread(run_pipeline_from_claim, core_claim)
+                    if result:
+                        result["type"] = "result"
+                        await websocket.send_text(json.dumps(result))
+                        logger.info(
+                            "Result sent: verdict=%s confidence=%.2f",
+                            result.get("claimVeracity"),
+                            result.get("confidenceScore", 0.0),
+                        )
 
     except WebSocketDisconnect:
         logger.info("Live Audit WebSocket disconnected.")

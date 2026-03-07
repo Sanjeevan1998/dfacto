@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers.live_audit import router as live_audit_router
+from routers.debug import router as debug_router
 
 load_dotenv()
 
@@ -52,6 +53,7 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(live_audit_router)
+app.include_router(debug_router)
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
@@ -62,6 +64,3 @@ async def health():
     return {"status": "ok", "version": app.version}
 
 
-# ── WebSocket endpoint (stub — filled in MT-3) ────────────────────────────────
-# from routers.live_audit import router as live_audit_router
-# app.include_router(live_audit_router)

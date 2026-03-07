@@ -1,0 +1,68 @@
+## Prompt 1
+
+Act as a Principal AI Systems Architect. I am building a real-time conversational fact-checking mobile application (iOS and Android).
+
+Your task is to generate a concise, modular AppRequirements.md file. This is the master blueprint. Structure it with the exact sections below:
+
+1. Executive Summary: Define the system as a voice-native fact-checking engine using a recursive multi-agent backend. The app features a 4-tab global navigation structure (Live Audit, Interactive, Scanner, Radar), but initial development is strictly isolated to the flagship "Live Audit" feature.
+
+2. High-Level Technology Stack: > * Frontend: Flutter SDK optimized for real-time streaming, augmented by the ui-ux-pro-max and stitch agent skills for premium, modular UI/UX design.
+
+    Backend: Python FastAPI for asynchronous throughput.
+
+    Orchestration: LangChain Framework for state management and agent routing.
+
+    Core LLM: Gemini Live API for low-latency ASR and advanced reasoning.
+
+3. Core System Data Flow (Focus: Live Audit): > * Phase 1: Frontend Ingestion (Flutter WebSockets streaming from the "Live Audit" tab) & Preprocessing (Agent 1 for claim extraction).
+
+    Phase 2: Supervisor Orchestration (Categorization, Confidence Scoring).
+
+    Phase 3: Parallel Worker Cluster (Agents 2a-2d).
+
+    Phase 4: Synthesis & Output (Formatting the JSON payload for the UI's Fact-Check Cards).
+
+4. Sub-Agent Orchestration: Define how sub-agents operate on strict, feature-specific instructions found in the docs/ folder.
+
+5. Phased Execution Roadmap: Outline a step-by-step development plan mapping to the docs/ markdown files. Ensure Phase 1 explicitly focuses on the UI shell and the Live Audit feature.
+
+Generate the AppRequirements.md file now. Do not write executable code.
+
+## Prompt 2
+
+## Phase 1 
+
+Act as a Senior Full-Stack Engineer and Orchestrator. We are ready to begin development on Phase 1 of our real-time fact-checking application.
+Please read docs/AppRequirements.md and docs/phase1-flutter-ui.md. Before writing code, adhere to these protocols:
+1. Start in Plan Mode: Break the phase into highly specific micro-tasks. Present this plan for explicit approval.
+2. Execution Guardrails:
+
+Scaffold the active phase and establish baseline connectivity.
+Always run terminal logs as a background task. Use MCP to read logs directly. Do not hallucinate errors.
+If stuck on an error for two attempts, stop, explain the blocker, and ask for guidance.
+3. Context & State Management: > * Make a Git commit with a descriptive message after verifying each micro-task.
+
+Actively compact your memory after every 3 micro-tasks.
+Output your micro-task plan for Phase 1 now, and wait for my confirmation.
+
+
+## Phase 2
+Act as a Senior Full-Stack Engineer and Orchestrator. We have successfully completed Phase 1 and are now ready to begin development on Phase 2 of our real-time fact-checking application.
+
+Please read docs/AppRequirements.md and docs/phase2-langchain-supervisor.md. Before writing any code, you must strictly adhere to these protocols:
+
+1. Start in Plan Mode: Break Phase 2 into highly specific micro-tasks. Present this plan for explicit approval.
+
+2. Execution Guardrails:
+
+Scaffold the Python/FastAPI backend and establish the LangGraph/LangChain Supervisor foundation.
+
+Always run the FastAPI terminal logs as a background task. Use MCP to read logs directly. Do not hallucinate errors.
+
+If you are stuck on an error for two attempts (e.g., a LangGraph cyclical routing error or Gemini API issue), stop, explain the blocker, and ask for guidance.
+
+3. Context & State Management: > * Make a Git commit with a descriptive message after verifying each micro-task.
+
+Actively compact your memory after every 3 micro-tasks to avoid context degradation while building the recursive loops.
+
+Output your micro-task plan for Phase 2 now, and wait for my confirmation before writing any code.
