@@ -93,15 +93,18 @@ def analyze_multimodal(claim: str, max_results: int = 4) -> list[dict]:
     try:
         prompt = _ANALYSIS_PROMPT.format(claim=claim, evidence_block=evidence_block)
         resp = _get_client().models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=[prompt],
             config=genai_types.GenerateContentConfig(
                 temperature=0.2,
                 max_output_tokens=300,
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
             ),
         )
         raw = resp.text.strip()
-        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("```").strip()
+        s, e = raw.find("{"), raw.rfind("}")
+        if s != -1 and e != -1:
+            raw = raw[s : e + 1]
         parsed = json.loads(raw)
 
         result = {

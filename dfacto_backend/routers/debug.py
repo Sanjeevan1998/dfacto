@@ -118,12 +118,19 @@ Example: ["Vaccines cause autism", "Neil Armstrong walked on the Moon in 1969"]
 Transcript:
 {transcript}"""
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=extract_prompt,
-            config=genai_types.GenerateContentConfig(temperature=0.1, max_output_tokens=400),
+            config=genai_types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=400,
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         import json, re
-        raw = re.sub(r"^```[a-z]*\n?", "", response.text.strip()).rstrip("```").strip()
+        raw = response.text.strip()
+        s, e = raw.find("["), raw.rfind("]")
+        if s != -1 and e != -1:
+            raw = raw[s : e + 1]
         claims_list = json.loads(raw)
         if not isinstance(claims_list, list):
             claims_list = []

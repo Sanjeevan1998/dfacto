@@ -103,16 +103,18 @@ def classify_claim(text: str, full_context: str = "") -> dict:
         )
         prompt = f'{_SYSTEM_PROMPT}{context_section}\nNew phrase to classify: "{text}"'
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
             config=genai_types.GenerateContentConfig(
                 temperature=0.1,
                 max_output_tokens=180,
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
             ),
         )
         raw = response.text.strip()
-        # Strip any markdown code fences
-        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("```").strip()
+        s, e = raw.find("{"), raw.rfind("}")
+        if s != -1 and e != -1:
+            raw = raw[s : e + 1]
         result = json.loads(raw)
         result["source"] = "gemini"
         logger.info(

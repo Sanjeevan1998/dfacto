@@ -58,7 +58,7 @@ def extract_claim(audio_bytes: bytes) -> dict[str, str]:
 
         # Upload audio inline as raw bytes (WAV/PCM, 16kHz 16-bit mono)
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(
                     data=audio_bytes,
@@ -66,14 +66,17 @@ def extract_claim(audio_bytes: bytes) -> dict[str, str]:
                 ),
                 _EXTRACTION_PROMPT,
             ],
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=400,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
 
         raw = response.text.strip()
-        # Strip markdown code fences if Gemini adds them
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+        s, e = raw.find("{"), raw.rfind("}")
+        if s != -1 and e != -1:
+            raw = raw[s : e + 1]
 
         parsed = json.loads(raw)
         return {
