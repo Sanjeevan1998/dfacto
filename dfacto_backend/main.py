@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from routers.live_audit import router as live_audit_router
 
 load_dotenv()
 
@@ -23,6 +24,12 @@ logger = logging.getLogger("dfacto")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 Dfacto backend starting up…")
+    # Pre-warm the LangGraph compilation (avoids cold-start on first WS frame)
+    try:
+        from agents.supervisor import _graph  # noqa: F401
+        logger.info("✅ LangGraph supervisor compiled and ready.")
+    except Exception as exc:
+        logger.exception("❌ LangGraph failed to compile: %s", exc)
     yield
     logger.info("🛑 Dfacto backend shutting down…")
 
@@ -43,7 +50,11 @@ app.add_middleware(
 )
 
 
-# ── Health ────────────────────────────────────────────────────────────────────
+# ── Routers ───────────────────────────────────────────────────────────────────
+app.include_router(live_audit_router)
+
+
+# ── Health ─────────────────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["meta"])
 async def health():
