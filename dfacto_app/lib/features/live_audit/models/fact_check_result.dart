@@ -1,4 +1,11 @@
-enum ClaimVeracity { trueVerdict, falseVerdict, mixed, unknown }
+enum ClaimVeracity {
+  trueVerdict,
+  mostlyTrue,
+  halfTrue,
+  mostlyFalse,
+  falseVerdict,
+  unknown,
+}
 
 class FactCheckResult {
   const FactCheckResult({
@@ -44,11 +51,19 @@ class FactCheckResult {
       case 'trueverdict':
       case 'true':
         return ClaimVeracity.trueVerdict;
+      case 'mostlytrue':
+      case 'mostly true':
+        return ClaimVeracity.mostlyTrue;
+      case 'halftrue':
+      case 'half true':
+      case 'mixed':
+        return ClaimVeracity.halfTrue;
+      case 'mostlyfalse':
+      case 'mostly false':
+        return ClaimVeracity.mostlyFalse;
       case 'falseverdict':
       case 'false':
         return ClaimVeracity.falseVerdict;
-      case 'mixed':
-        return ClaimVeracity.mixed;
       default:
         return ClaimVeracity.unknown;
     }

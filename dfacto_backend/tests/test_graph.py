@@ -120,16 +120,17 @@ class TestRoutingLogic:
         # Router now routes to increment_depth node (not directly to fan_out)
         assert route_after_aggregate(state) == "increment_depth"
 
-    def test_high_confidence_goes_to_synthesize(self):
+    def test_high_confidence_goes_to_judge(self):
         from agents.supervisor import route_after_aggregate
         state = GraphState(core_claim="Test", confidence=0.85, depth=0)
-        assert route_after_aggregate(state) == "synthesize"
+        # High confidence → skip recursion → go to Final Judge node
+        assert route_after_aggregate(state) == "node_judge"
 
-    def test_max_depth_always_synthesizes(self):
+    def test_max_depth_always_goes_to_judge(self):
         from agents.supervisor import route_after_aggregate
         state = GraphState(core_claim="Test", confidence=0.1, depth=3)
-        # depth == MAX_DEPTH, so no more recursion
-        assert route_after_aggregate(state) == "synthesize"
+        # depth == MAX_DEPTH → no more recursion → go to Final Judge node
+        assert route_after_aggregate(state) == "node_judge"
 
 
 # ── Unit: Categorisation ───────────────────────────────────────────────────────
@@ -167,7 +168,7 @@ class TestGraphCompilation:
     def test_graph_has_expected_nodes(self):
         from agents.supervisor import _graph
         nodes = set(_graph.get_graph().nodes.keys())
-        for expected in {"extract", "categorize", "fan_out", "aggregate", "synthesize"}:
+        for expected in {"extract", "categorize", "fan_out", "aggregate", "node_judge", "synthesize"}:
             assert expected in nodes, f"Missing node: {expected}"
 
 
@@ -181,8 +182,19 @@ class TestFullPipeline:
     @patch("agents.supervisor.search_trusted_dbs", return_value=[
         {"source": "snopes", "stance": "contradict", "excerpt": "Snopes: FALSE", "url": "https://snopes.com/test", "trust_weight": 1.5},
     ])
+    @patch("agents.supervisor.search_social", return_value=[])
+    @patch("agents.supervisor.analyze_multimodal", return_value=[])
+    @patch("agents.supervisor.node_judge", return_value={
+        "verdict": "FALSE",
+        "confidence": 0.15,
+        "summary": "The claim is debunked by multiple sources.",
+        "source_url": "https://snopes.com/test",
+    })
     def test_pipeline_returns_false_for_flat_earth(
         self,
+        _mock_judge,
+        _mock_multimodal,
+        _mock_social,
         _mock_trusted,
         _mock_web,
         mock_get_client,

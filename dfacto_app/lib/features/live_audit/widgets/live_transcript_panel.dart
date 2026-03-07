@@ -65,10 +65,14 @@ class _LiveTranscriptPanelState extends State<LiveTranscriptPanel>
     switch (v) {
       case ClaimVeracity.trueVerdict:
         return DfactoColors.verdictTrue;
+      case ClaimVeracity.mostlyTrue:
+        return const Color(0xFF8BC34A);
+      case ClaimVeracity.halfTrue:
+        return DfactoColors.verdictMixed;
+      case ClaimVeracity.mostlyFalse:
+        return const Color(0xFFFF5722);
       case ClaimVeracity.falseVerdict:
         return DfactoColors.verdictFalse;
-      case ClaimVeracity.mixed:
-        return DfactoColors.verdictMixed;
       case ClaimVeracity.unknown:
         return DfactoColors.verdictUnknown;
     }
@@ -78,10 +82,14 @@ class _LiveTranscriptPanelState extends State<LiveTranscriptPanel>
     switch (v) {
       case ClaimVeracity.trueVerdict:
         return '✓';
+      case ClaimVeracity.mostlyTrue:
+        return '✓~';
+      case ClaimVeracity.halfTrue:
+        return '~';
+      case ClaimVeracity.mostlyFalse:
+        return '✗~';
       case ClaimVeracity.falseVerdict:
         return '✗';
-      case ClaimVeracity.mixed:
-        return '~';
       case ClaimVeracity.unknown:
         return '?';
     }

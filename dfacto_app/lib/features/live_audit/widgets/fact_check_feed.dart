@@ -70,7 +70,7 @@ final List<FactCheckResult> _mockResults = [
   FactCheckResult(
     id: '1',
     claimText: 'The economy grew by 4.2% last quarter.',
-    claimVeracity: ClaimVeracity.mixed,
+    claimVeracity: ClaimVeracity.halfTrue,
     confidenceScore: 0.61,
     summaryAndExplanation:
         'GDP grew by 2.1%, not 4.2%. The higher figure refers to a single sector, not the overall economy.',

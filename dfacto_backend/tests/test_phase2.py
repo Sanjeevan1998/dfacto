@@ -128,7 +128,17 @@ class TestTextInjectionPipeline:
         {"source": "snopes", "stance": "support", "excerpt": "Snopes: TRUE",
          "url": "https://snopes.com/true", "trust_weight": 1.5},
     ])
-    def test_text_injection_returns_fact_check_result(self, _mock_trusted, _mock_web):
+    @patch("agents.supervisor.search_social", return_value=[])
+    @patch("agents.supervisor.analyze_multimodal", return_value=[])
+    @patch("agents.supervisor.node_judge", return_value={
+        "verdict": "TRUE",
+        "confidence": 0.90,
+        "summary": "Confirmed by multiple sources.",
+        "source_url": "https://snopes.com/true",
+    })
+    def test_text_injection_returns_fact_check_result(
+        self, _mock_judge, _mock_multimodal, _mock_social, _mock_trusted, _mock_web,
+    ):
         from agents.supervisor import run_pipeline_from_claim
         result = run_pipeline_from_claim("Neil Armstrong walked on the Moon in 1969")
         assert result is not None
@@ -158,7 +168,17 @@ class TestTextInjectionPipeline:
         {"source": "snopes", "stance": "contradict", "excerpt": "Snopes: FALSE",
          "url": "https://snopes.com/false", "trust_weight": 1.5},
     ])
-    def test_strong_contradict_returns_false_verdict(self, _mock_trusted, _mock_web):
+    @patch("agents.supervisor.search_social", return_value=[])
+    @patch("agents.supervisor.analyze_multimodal", return_value=[])
+    @patch("agents.supervisor.node_judge", return_value={
+        "verdict": "FALSE",
+        "confidence": 0.10,
+        "summary": "Debunked by multiple authoritative sources.",
+        "source_url": "https://snopes.com/false",
+    })
+    def test_strong_contradict_returns_false_verdict(
+        self, _mock_judge, _mock_multimodal, _mock_social, _mock_trusted, _mock_web,
+    ):
         from agents.supervisor import run_pipeline_from_claim
         result = run_pipeline_from_claim("The Earth is flat")
         assert result is not None

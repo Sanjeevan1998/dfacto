@@ -12,10 +12,14 @@ class FactCheckCard extends StatelessWidget {
     switch (result.claimVeracity) {
       case ClaimVeracity.trueVerdict:
         return DfactoColors.verdictTrue;
+      case ClaimVeracity.mostlyTrue:
+        return const Color(0xFF8BC34A); // light green
+      case ClaimVeracity.halfTrue:
+        return DfactoColors.verdictMixed;
+      case ClaimVeracity.mostlyFalse:
+        return const Color(0xFFFF5722); // deep orange
       case ClaimVeracity.falseVerdict:
         return DfactoColors.verdictFalse;
-      case ClaimVeracity.mixed:
-        return DfactoColors.verdictMixed;
       case ClaimVeracity.unknown:
         return DfactoColors.verdictUnknown;
     }
@@ -25,12 +29,16 @@ class FactCheckCard extends StatelessWidget {
     switch (result.claimVeracity) {
       case ClaimVeracity.trueVerdict:
         return 'TRUE';
+      case ClaimVeracity.mostlyTrue:
+        return 'MOSTLY TRUE';
+      case ClaimVeracity.halfTrue:
+        return 'HALF TRUE';
+      case ClaimVeracity.mostlyFalse:
+        return 'MOSTLY FALSE';
       case ClaimVeracity.falseVerdict:
         return 'FALSE';
-      case ClaimVeracity.mixed:
-        return 'MIXED';
       case ClaimVeracity.unknown:
-        return 'UNKNOWN';
+        return 'UNVERIFIABLE';
     }
   }
 
@@ -38,10 +46,14 @@ class FactCheckCard extends StatelessWidget {
     switch (result.claimVeracity) {
       case ClaimVeracity.trueVerdict:
         return Icons.check_circle_rounded;
+      case ClaimVeracity.mostlyTrue:
+        return Icons.check_circle_outline_rounded;
+      case ClaimVeracity.halfTrue:
+        return Icons.info_rounded;
+      case ClaimVeracity.mostlyFalse:
+        return Icons.warning_amber_rounded;
       case ClaimVeracity.falseVerdict:
         return Icons.cancel_rounded;
-      case ClaimVeracity.mixed:
-        return Icons.info_rounded;
       case ClaimVeracity.unknown:
         return Icons.help_rounded;
     }

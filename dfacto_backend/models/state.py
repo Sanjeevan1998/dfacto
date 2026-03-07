@@ -6,12 +6,13 @@ node in the LangGraph supervisor pipeline.
 from __future__ import annotations
 
 from typing import Annotated, Any, Sequence
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 import operator
 
 
 class EvidenceItem(BaseModel):
     """A single piece of evidence returned by a worker agent."""
+    model_config = ConfigDict(extra="ignore")
 
     source: str = Field(description="Origin: 'web', 'snopes', 'politifact', etc.")
     stance: str = Field(description="'support' | 'contradict' | 'neutral'")
@@ -70,7 +71,7 @@ class GraphState(BaseModel):
     )
     verdict: str = Field(
         default="UNKNOWN",
-        description="Final verdict: TRUE | FALSE | MIXED | UNKNOWN",
+        description="Final verdict: TRUE | MOSTLY TRUE | HALF TRUE | MOSTLY FALSE | FALSE | UNVERIFIABLE | UNKNOWN",
     )
     summary: str = Field(
         default="",
