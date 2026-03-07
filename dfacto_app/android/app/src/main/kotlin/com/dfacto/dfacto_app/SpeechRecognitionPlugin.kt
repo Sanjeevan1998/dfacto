@@ -22,8 +22,12 @@ import java.util.Locale
  * Flutter EventChannel StreamHandler wrapping ML Kit GenAI Speech Recognition.
  *
  * Channel : "com.dfacto/speech_recognition"
- * Emits   : String (transcript text chunks — partial or final)
- * Errors  : UNAVAILABLE | DOWNLOAD_FAILED | RECOGNITION_ERROR
+ *
+ * Emits Map payloads:
+ *   Transcript  → {"text": String, "isFinal": Boolean}
+ *   Status      → {"status": String}   e.g. "downloading", "available", "unavailable"
+ *
+ * Errors: UNAVAILABLE | DOWNLOAD_FAILED | RECOGNITION_ERROR
  */
 class SpeechRecognitionPlugin(
     private val context: android.content.Context
@@ -34,7 +38,18 @@ class SpeechRecognitionPlugin(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // ── EventChannel.StreamHandler ───────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private fun emitStatus(events: EventChannel.EventSink, status: String) {
+        mainHandler.post { events.success(mapOf("status" to status)) }
+    }
+
+    private fun emitTranscript(events: EventChannel.EventSink, text: String, isFinal: Boolean) {
+        if (text.isBlank()) return
+        mainHandler.post { events.success(mapOf("text" to text, "isFinal" to isFinal)) }
+    }
+
+    // ── EventChannel.StreamHandler ────────────────────────────────────────────
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
         val options: SpeechRecognizerOptions = speechRecognizerOptions {
@@ -48,24 +63,23 @@ class SpeechRecognitionPlugin(
                 val status: Int = recognizer!!.checkStatus()
                 when (status) {
                     FeatureStatus.AVAILABLE -> {
+                        emitStatus(events, "available")
                         startRecognition(events)
                     }
                     FeatureStatus.DOWNLOADABLE -> {
+                        emitStatus(events, "downloading")
                         recognizer!!.download().collect { downloadStatus ->
                             when (downloadStatus) {
                                 is DownloadStatus.DownloadCompleted -> {
+                                    emitStatus(events, "available")
                                     startRecognition(events)
                                 }
                                 is DownloadStatus.DownloadFailed -> {
                                     mainHandler.post {
-                                        events.error(
-                                            "DOWNLOAD_FAILED",
-                                            "ML Kit model download failed",
-                                            null
-                                        )
+                                        events.error("DOWNLOAD_FAILED", "ML Kit model download failed", null)
                                     }
                                 }
-                                is DownloadStatus.DownloadProgress -> { /* ignored */ }
+                                is DownloadStatus.DownloadProgress -> { /* no-op */ }
                                 else -> {}
                             }
                         }
@@ -81,9 +95,7 @@ class SpeechRecognitionPlugin(
                     }
                 }
             } catch (e: Exception) {
-                mainHandler.post {
-                    events.error("RECOGNITION_ERROR", e.message, null)
-                }
+                mainHandler.post { events.error("RECOGNITION_ERROR", e.message, null) }
             }
         }
     }
@@ -92,15 +104,13 @@ class SpeechRecognitionPlugin(
         recognitionJob?.cancel()
         recognitionJob = null
         scope.launch {
-            try {
-                recognizer?.stopRecognition()
-                recognizer?.close()
-            } catch (_: Exception) {}
+            try { recognizer?.stopRecognition(); recognizer?.close() }
+            catch (_: Exception) {}
             recognizer = null
         }
     }
 
-    // ── Internal ─────────────────────────────────────────────────────────────
+    // ── Recognition loop ──────────────────────────────────────────────────────
 
     private fun startRecognition(events: EventChannel.EventSink) {
         recognitionJob = scope.launch {
@@ -110,21 +120,18 @@ class SpeechRecognitionPlugin(
                 }
 
                 recognizer!!.startRecognition(request).collect { response ->
-                    val text: String? = when (response) {
-                        is SpeechRecognizerResponse.PartialTextResponse -> response.text
-                        is SpeechRecognizerResponse.FinalTextResponse   -> response.text
-                        is SpeechRecognizerResponse.CompletedResponse   -> null
-                        is SpeechRecognizerResponse.ErrorResponse       -> null
-                        else -> null
-                    }
-                    if (!text.isNullOrBlank()) {
-                        mainHandler.post { events.success(text) }
+                    when (response) {
+                        is SpeechRecognizerResponse.PartialTextResponse ->
+                            emitTranscript(events, response.text, isFinal = false)
+                        is SpeechRecognizerResponse.FinalTextResponse ->
+                            emitTranscript(events, response.text, isFinal = true)
+                        is SpeechRecognizerResponse.CompletedResponse -> { /* session done */ }
+                        is SpeechRecognizerResponse.ErrorResponse -> { /* ignored */ }
+                        else -> {}
                     }
                 }
             } catch (e: Exception) {
-                mainHandler.post {
-                    events.error("RECOGNITION_ERROR", e.message, null)
-                }
+                mainHandler.post { events.error("RECOGNITION_ERROR", e.message, null) }
             }
         }
     }

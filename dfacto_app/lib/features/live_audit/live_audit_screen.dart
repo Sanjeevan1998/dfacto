@@ -21,6 +21,12 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
   bool _isListening = false;
   bool _isStopping = false;
 
+  // ML Kit model download in progress — show spinner instead of mic.
+  bool _isModelDownloading = false;
+
+  // Granola-style transcript:
+  //   _committedText = all final segments joined
+  //   _partialText   = current in-progress partial (shown in muted style)
   String _committedText = '';
   String _partialText = '';
 
@@ -47,26 +53,42 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
       _finalizeSession();
     });
 
-    // Start on-device ML Kit GenAI STT via Kotlin EventChannel.
     _stt.start(
-      onTranscript: (String text) {
+      onTranscript: (String text, bool isFinal) {
         if (!mounted) return;
         setState(() {
-          _committedText = _committedText.isEmpty ? text : '$_committedText $text';
-          _partialText = '';
+          if (isFinal) {
+            // Commit to the permanent buffer.
+            _committedText = _committedText.isEmpty
+                ? text
+                : '$_committedText $text';
+            _partialText = '';
+          } else {
+            // Show as in-progress partial (replaced on next partial).
+            _partialText = text;
+          }
         });
-        // Forward transcription text to the backend.
-        _ws.sendTranscriptText(text, isFinal: true);
+        // Send to backend — isFinal distinguishes utterance boundary.
+        _ws.sendTranscriptText(text, isFinal: isFinal);
+      },
+      onStatus: (String status) {
+        if (!mounted) return;
+        setState(() {
+          _isModelDownloading = status == 'downloading';
+        });
+        if (status == 'available') {
+          // Model is ready — already triggered startRecognition() in Kotlin.
+          // No action needed here.
+        }
       },
       onError: (String code, String message) {
         if (!mounted) return;
-        // Show a snackbar for recognized error codes.
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
               code == 'UNAVAILABLE'
                   ? 'On-device GenAI STT not available on this device.'
-                  : 'Speech recognition error ($code): $message',
+                  : 'Speech error ($code): $message',
             ),
             backgroundColor: DfactoColors.verdictFalse,
           ),
@@ -74,6 +96,7 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
         setState(() {
           _isListening = false;
           _isStopping = false;
+          _isModelDownloading = false;
         });
       },
     );
@@ -88,12 +111,25 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
     setState(() {
       _isListening = false;
       _isStopping = true;
+      _isModelDownloading = false;
     });
 
     _stt.stop();
+
+    // Flush any in-progress partial as final before stopping.
+    if (_partialText.isNotEmpty) {
+      _ws.sendTranscriptText(_partialText, isFinal: true);
+      setState(() {
+        _committedText = _committedText.isEmpty
+            ? _partialText
+            : '$_committedText $_partialText';
+        _partialText = '';
+      });
+    }
+
     _ws.sendStop();
 
-    // Safety timeout in case backend doesn't send "done".
+    // Safety timeout.
     Future.delayed(const Duration(seconds: 30), () {
       if (mounted && _isStopping) _finalizeSession();
     });
@@ -132,7 +168,9 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final hasTranscript = _committedText.isNotEmpty || _partialText.isNotEmpty;
+    final hasContent = _committedText.isNotEmpty ||
+        _partialText.isNotEmpty ||
+        _results.isNotEmpty;
 
     return Scaffold(
       backgroundColor: context.bg,
@@ -155,7 +193,11 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
                     ],
                   ),
                   const Spacer(),
-                  _StatusChip(isListening: _isListening, isStopping: _isStopping),
+                  _StatusChip(
+                    isListening: _isListening,
+                    isStopping: _isStopping,
+                    isDownloading: _isModelDownloading,
+                  ),
                   const SizedBox(width: 10),
                   const ThemeToggleButton(),
                 ],
@@ -163,7 +205,7 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
             ),
             const SizedBox(height: 16),
 
-            // ── Waveform + Mic button ─────────────────────────────────────────
+            // ── Waveform + Mic / Download indicator ───────────────────────────
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Container(
@@ -178,12 +220,27 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
                     Expanded(
                       child: Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: WaveformVisualizer(isActive: _isListening),
+                        child: _isModelDownloading
+                            ? Row(
+                                children: [
+                                  const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Text(
+                                    'Downloading AI model…',
+                                    style: DfactoTextStyles.bodySmall(context.textMuted),
+                                  ),
+                                ],
+                              )
+                            : WaveformVisualizer(isActive: _isListening),
                       ),
                     ),
                     Padding(
                       padding: const EdgeInsets.only(right: 16),
-                      child: _isStopping
+                      child: _isModelDownloading || _isStopping
                           ? const SizedBox(
                               width: 44,
                               height: 44,
@@ -208,12 +265,12 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
                   Text('Live Transcript',
                       style: DfactoTextStyles.headlineMedium(context.textPrimary)),
                   const Spacer(),
-                  if (hasTranscript || _results.isNotEmpty)
+                  if (hasContent)
                     GestureDetector(
                       onTap: () => setState(() {
                         _committedText = '';
-                        _results.clear();
                         _partialText = '';
+                        _results.clear();
                       }),
                       child: Text('Clear all',
                           style: DfactoTextStyles.bodySmall(context.textMuted)),
@@ -281,19 +338,36 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 // ── Status chip ───────────────────────────────────────────────────────────────
 
 class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.isListening, required this.isStopping});
+  const _StatusChip({
+    required this.isListening,
+    required this.isStopping,
+    required this.isDownloading,
+  });
+
   final bool isListening;
   final bool isStopping;
+  final bool isDownloading;
 
   @override
   Widget build(BuildContext context) {
-    final label = isListening ? 'HOT MIC' : isStopping ? 'PROCESSING' : 'IDLE';
-    final active = isListening || isStopping;
-    final color = isListening
-        ? DfactoColors.verdictTrue
-        : isStopping
-            ? DfactoColors.verdictMixed
-            : context.textMuted;
+    final String label;
+    final Color color;
+
+    if (isDownloading) {
+      label = 'MODEL DL';
+      color = DfactoColors.verdictMixed;
+    } else if (isListening) {
+      label = 'HOT MIC';
+      color = DfactoColors.verdictTrue;
+    } else if (isStopping) {
+      label = 'PROCESSING';
+      color = DfactoColors.verdictMixed;
+    } else {
+      label = 'IDLE';
+      color = context.textMuted;
+    }
+
+    final active = isListening || isStopping || isDownloading;
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 400),
