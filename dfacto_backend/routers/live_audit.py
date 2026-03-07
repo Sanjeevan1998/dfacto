@@ -18,6 +18,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from agents.agent1_extractor import extract_claim
+from agents.claim_classifier import classify_claim
 from agents.supervisor import run_pipeline_from_claim
 
 logger = logging.getLogger("dfacto.live_audit")
@@ -49,25 +50,37 @@ async def live_audit_ws(websocket: WebSocket):
                 core_claim = extraction.get("core_claim", "").strip()
 
                 if transcript:
-                    # Send transcript text immediately so UI can show it
+                    # ── Agent 0: Classify whether transcript contains a checkable claim ──
+                    classification = await asyncio.to_thread(classify_claim, transcript)
+                    is_claim = classification.get("is_claim", False)
+                    needs_context = classification.get("needs_context", False)
+                    extracted = classification.get("extracted_claim", "").strip()
+                    logger.info(
+                        "Classifier: is_claim=%s needs_context=%s source=%s claim=%r",
+                        is_claim, needs_context, classification.get("source"), extracted[:60],
+                    )
+
+                    # Send transcript immediately so UI can show it
                     await websocket.send_text(json.dumps({
                         "type": "transcript",
                         "text": transcript,
-                        "claim": core_claim,
+                        "claim": extracted or core_claim,
+                        "needsContext": needs_context,
                     }))
-                    logger.info("Transcript sent: %r (claim: %r)", transcript[:80], core_claim)
+                    logger.info("Transcript sent: %r", transcript[:80])
 
-                # ── Phase 2: Fact-check if a claim was found ──────────────────
-                if core_claim:
-                    result = await asyncio.to_thread(run_pipeline_from_claim, core_claim)
-                    if result:
-                        result["type"] = "result"
-                        await websocket.send_text(json.dumps(result))
-                        logger.info(
-                            "Result sent: verdict=%s confidence=%.2f",
-                            result.get("claimVeracity"),
-                            result.get("confidenceScore", 0.0),
-                        )
+                    # ── Phase 2: Fact-check only if classifier confirms a verifiable claim ──
+                    if is_claim and not needs_context:
+                        claim_to_check = extracted or core_claim
+                        result = await asyncio.to_thread(run_pipeline_from_claim, claim_to_check)
+                        if result:
+                            result["type"] = "result"
+                            await websocket.send_text(json.dumps(result))
+                            logger.info(
+                                "Result sent: verdict=%s confidence=%.2f",
+                                result.get("claimVeracity"),
+                                result.get("confidenceScore", 0.0),
+                            )
 
     except WebSocketDisconnect:
         logger.info("Live Audit WebSocket disconnected.")
