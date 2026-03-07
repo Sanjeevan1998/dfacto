@@ -81,3 +81,7 @@ class GraphState(BaseModel):
         default=None,
         description="Primary source URL to display in the Flutter Fact-Check Card.",
     )
+    source_urls: list[str] = Field(
+        default_factory=list,
+        description="Top source URLs sorted by evidence trust_weight (most authoritative first).",
+    )

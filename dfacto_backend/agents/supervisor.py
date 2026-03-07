@@ -158,12 +158,18 @@ You are Agent 2e — the Final Judge in a fact-checking system. Your job is to c
 
 Claim: "{claim}"
 
-Evidence from multiple independent workers (source, stance, excerpt, trust_weight):
+Evidence from multiple independent workers, listed highest-trust first (source, stance, excerpt, trust_weight):
 {evidence_block}
 
 Aggregate confidence score: {confidence:.2f} (0=fully false, 0.5=mixed, 1=fully true)
 
-Based on ALL evidence, determine the most accurate verdict. Use these 6 categories ONLY:
+CRITICAL WEIGHTING RULE — apply this strictly:
+- trust_weight=1.5 sources (Snopes, PolitiFact, FactCheck.org) are authoritative fact-checkers. Their stance MUST be the primary basis for your verdict. If they say FALSE or TRUE, that carries dominant weight.
+- trust_weight=1.2 sources (multimodal_analysis) provide deep semantic and contextual analysis — treat as strong secondary evidence.
+- trust_weight=1.0 sources (general web/Tavily) provide corroborating context only. Do not let them override authoritative fact-checkers.
+- trust_weight=0.6 sources (Reddit/social) reflect public discourse only — use ONLY to note public perception, never as primary factual evidence.
+
+Based on ALL evidence and applying the weighting rule above, determine the most accurate verdict. Use these 6 categories ONLY:
 - TRUE: The claim is factually correct and well-supported.
 - MOSTLY TRUE: Mostly accurate but with minor inaccuracies or missing nuance.
 - HALF TRUE: Partially accurate — contains a mix of true and false elements.
@@ -171,19 +177,21 @@ Based on ALL evidence, determine the most accurate verdict. Use these 6 categori
 - FALSE: The claim is factually incorrect, debunked, or unsupported.
 - UNVERIFIABLE: Insufficient evidence to make a determination.
 
-Respond ONLY with valid JSON (no markdown):
+Respond ONLY with valid JSON (no markdown, no code fences):
 {{
   "verdict": "<TRUE|MOSTLY TRUE|HALF TRUE|MOSTLY FALSE|FALSE|UNVERIFIABLE>",
   "confidence": <refined 0.0-1.0>,
-  "explanation": "<2-3 sentence synthesis explaining the verdict with evidence>",
+  "explanation": "<2-3 sentence plain-text synthesis explaining the verdict with evidence. No markdown formatting.>",
   "key_source": "<URL of the single most authoritative source cited>"
 }}
 """
 
 
 def _build_evidence_block(items: list[EvidenceItem]) -> str:
+    """Build evidence block sorted by trust_weight descending (most authoritative first)."""
+    sorted_items = sorted(items, key=lambda x: x.trust_weight, reverse=True)
     parts = []
-    for i, item in enumerate(items, 1):
+    for i, item in enumerate(sorted_items, 1):
         parts.append(
             f"[{i}] source={item.source} stance={item.stance} "
             f"trust={item.trust_weight:.1f}\n    {item.excerpt[:160]}\n    url={item.url}"
@@ -195,6 +203,7 @@ def node_judge(state: GraphState) -> dict:
     """
     Agent 2e — Final Judge.
     Uses Gemini to critically evaluate all evidence and produce a 6-category verdict.
+    Evidence is sorted by trust_weight; trusted fact-checkers are explicitly prioritized.
     Falls back to coarse aggregate verdict if Gemini fails.
     """
     items = state.worker_results
@@ -208,12 +217,14 @@ def node_judge(state: GraphState) -> dict:
         confidence=state.confidence,
     )
 
-    # Find best source URL from trusted items
-    best_url = None
+    # Collect top-3 source URLs sorted by trust_weight (most authoritative first)
+    source_urls: list[str] = []
     for item in sorted(items, key=lambda x: x.trust_weight, reverse=True):
-        if item.url:
-            best_url = item.url
+        if item.url and item.url not in source_urls:
+            source_urls.append(item.url)
+        if len(source_urls) >= 3:
             break
+    best_url = source_urls[0] if source_urls else None
 
     try:
         resp = _get_gemini_client().models.generate_content(
@@ -221,7 +232,7 @@ def node_judge(state: GraphState) -> dict:
             contents=[prompt],
             config=genai_types.GenerateContentConfig(
                 temperature=0.2,
-                max_output_tokens=350,
+                max_output_tokens=400,
             ),
         )
         raw = resp.text.strip()
@@ -234,23 +245,24 @@ def node_judge(state: GraphState) -> dict:
         key_source = parsed.get("key_source") or best_url
 
         logger.info(
-            "Final Judge: verdict=%s confidence=%.2f",
+            "Final Judge: verdict=%s confidence=%.2f sources=%d",
             verdict,
             confidence,
+            len(source_urls),
         )
         return {
             "verdict": verdict,
             "confidence": confidence,
             "summary": explanation,
             "source_url": key_source,
+            "source_urls": source_urls,
         }
 
     except Exception as exc:
         logger.warning("Final Judge Gemini failed, using aggregate verdict: %s", exc)
-        # Build fallback summary from evidence excerpts
         excerpts = [i.excerpt for i in items if i.excerpt]
         summary = excerpts[0] if excerpts else f"Verdict based on {len(items)} sources."
-        return {"summary": summary, "source_url": best_url}
+        return {"summary": summary, "source_url": best_url, "source_urls": source_urls}
 
 
 def node_increment_depth(state: GraphState) -> dict:
@@ -351,6 +363,17 @@ def run_pipeline_from_claim(claim_text: str) -> dict | None:
     return _format_result(final)
 
 
+def _sanitize_text(text: str) -> str:
+    """Strip markdown formatting so Flutter renders clean plain text."""
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)              # **bold**
+    text = re.sub(r'\*(.+?)\*', r'\1', text)                  # *italic*
+    text = re.sub(r'__(.+?)__', r'\1', text)                  # __bold__
+    text = re.sub(r'_(.+?)_', r'\1', text)                    # _italic_
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE) # headers
+    text = re.sub(r'`(.+?)`', r'\1', text)                    # `code`
+    return text.strip()
+
+
 # 6-category Flutter veracity map
 _VERACITY_MAP = {
     "TRUE":          "trueVerdict",
@@ -373,11 +396,13 @@ def _format_result(final: dict) -> dict | None:
         return None
 
     verdict = final.get("verdict", "UNKNOWN").upper()
+    source_urls = final.get("source_urls") or []
     return {
         "id": str(uuid.uuid4()),
         "claimText": core_claim,
         "claimVeracity": _VERACITY_MAP.get(verdict, "unknown"),
         "confidenceScore": round(final.get("confidence", 0.0), 3),
-        "summaryAndExplanation": final.get("summary", ""),
-        "keySource": final.get("source_url"),
+        "summaryAndExplanation": _sanitize_text(final.get("summary", "")),
+        "keySource": final.get("source_url"),    # backward-compat single URL
+        "key_sources": source_urls[:3],          # doc schema — array of top-3 URLs
     }
