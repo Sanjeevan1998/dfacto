@@ -1,38 +1,32 @@
 """
-WebSocket router — Live Audit pipeline.
+WebSocket router — Live Audit pipeline (Gemini Live API transcription).
 
 Route: WS /ws/live-audit
 
 Protocol
 --------
-Flutter → Backend  : text  {"type":"transcript_text","text":"...","isFinal":true/false}
-Flutter → Backend  : text  {"type":"stop"}
-Backend → Flutter  : text  {"type":"result",...}   FactCheckResult when claim verified
-Backend → Flutter  : text  {"type":"done"}          after stop + all tasks finish
-Backend → Flutter  : text  {"type":"error","message":"..."}  on fatal error
+Flutter → Backend  : binary   raw PCM audio (16kHz, 16-bit, mono)
+Flutter → Backend  : text     {"type":"stop"}
+Backend → Flutter  : text     {"type":"transcript","text":"...","is_final":true}
+Backend → Flutter  : text     {"type":"result",...}   FactCheckResult
+Backend → Flutter  : text     {"type":"done"}         after stop + all tasks finish
+Backend → Flutter  : text     {"type":"error","message":"..."}
 
 Architecture (3-layer pipeline)
 --------------------------------
-Layer 1 — Agent 1a (WS Ingestor)
-    Dedicated strictly to the WebSocket receive loop.
-    Pushes each final utterance text into an asyncio.Queue.
-    Zero dropped words — the queue decouples receipt from processing.
+Layer 1 — Gemini Live API Pipe
+    Receives raw binary PCM audio from Flutter WebSocket.
+    Opens a Gemini Live session with input_audio_transcription enabled.
+    Task A: Pipes audio bytes → Gemini via session.send_realtime_input().
+    Task B: Reads session.receive() → extracts input_transcription.text
+            → pushes into Agent 1b queue + sends transcript back to Flutter.
 
-Layer 2 — Agent 1b (Context & Meaning Accumulator)
-    pump_transcript() coroutine reads from the queue.
+Layer 2 — Agent 1b (Context & Meaning Accumulator)  [UNCHANGED]
+    pump_transcript() reads from the queue.
     Maintains a ContextWindow: ALL words spoken this session are kept.
-    Never discards spoken words — uses _check_from_idx pointer to know
-    which words are "new since last check".
-    Fires Layer 3 as a fire-and-forget asyncio.Task when:
-        a) Enough new words have arrived since last check (CHUNK_WORDS), OR
-        b) An utterance boundary arrives and MIN_NEW_WORDS threshold met.
-    Transcript continues flowing while fact-checking runs concurrently.
 
-Layer 3 — Agent 1c → pipeline [background asyncio.Task per window]
-    classify_claim(new_window, full_context) → is there a verifiable claim?
-    run_pipeline_from_claim(claim) → workers in parallel.
-    Sends {"type":"result",...} to Flutter when done.
-    Multiple instances run concurrently across overlapping windows.
+Layer 3 — Agent 1c → pipeline  [UNCHANGED]
+    classify_claim → run_pipeline_from_claim → result to Flutter.
 """
 
 from __future__ import annotations
@@ -40,8 +34,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
+
+from google import genai
+from google.genai import types as genai_types
 
 from agents.claim_classifier import classify_claim
 from agents.supervisor import run_pipeline_from_claim
@@ -49,6 +48,23 @@ from agents.supervisor import run_pipeline_from_claim
 logger = logging.getLogger("dfacto.live_audit")
 
 router = APIRouter()
+
+# ── Gemini Live API config ────────────────────────────────────────────────────
+
+_GEMINI_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+_GEMINI_LIVE_CONFIG = {
+    "response_modalities": ["TEXT"],
+    "input_audio_transcription": {},
+    "system_instruction": (
+        "You are a silent transcription engine. Your ONLY job is to transcribe "
+        "the audio input accurately. Do NOT respond, comment, or add anything. "
+        "Just transcribe what you hear."
+    ),
+}
+
+
+def _get_gemini_client() -> genai.Client:
+    return genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
 
 
 # ── Agent 1b: Context Window (NEVER discards session words) ───────────────────
@@ -60,8 +76,8 @@ class ContextWindow:
     are new since the last fact-check trigger.
     """
 
-    CHUNK_NEW_WORDS: int = 30   # Trigger fact-check after this many new words
-    MIN_NEW_WORDS: int = 8      # Minimum new words before firing on utterance boundary
+    CHUNK_NEW_WORDS: int = 50   # Trigger fact-check after this many new words
+    MIN_NEW_WORDS: int = 25     # Minimum new words before firing on utterance boundary
 
     def __init__(self) -> None:
         self._words: list[str] = []       # Full session transcript (never shrinks)
@@ -168,50 +184,6 @@ async def _fact_check_and_send(
             pass
 
 
-# ── Agent 1a: WS Ingestor → asyncio.Queue ─────────────────────────────────────
-
-async def _ingest_ws(
-    websocket: WebSocket,
-    queue: asyncio.Queue[tuple[str, bool] | None],
-) -> None:
-    """
-    Agent 1a — dedicated WS receive loop.
-    Pushes (text, is_final) tuples into the queue.
-    Sends None sentinel to signal stop.
-    """
-    try:
-        async for raw in websocket.iter_text():
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-
-            msg_type = msg.get("type", "")
-
-            if msg_type == "stop":
-                logger.info("Stop signal received")
-                break
-
-            if msg_type != "transcript_text":
-                continue
-
-            text = msg.get("text", "").strip()
-            is_final = bool(msg.get("isFinal", False))
-
-            if not text:
-                continue
-
-            logger.info("Transcript text (isFinal=%s): %r", is_final, text[:100])
-            await queue.put((text, is_final))
-
-    except WebSocketDisconnect:
-        logger.info("Live Audit WS disconnected during ingest")
-    except Exception as exc:
-        logger.exception("WS ingest error: %s", exc)
-    finally:
-        await queue.put(None)  # sentinel → pump_transcript exits
-
-
 # ── Agent 1b: Context Accumulator + fire-and-forget trigger ───────────────────
 
 async def _pump_transcript(
@@ -240,7 +212,7 @@ async def _pump_transcript(
     while True:
         item = await queue.get()
 
-        if item is None:  # sentinel — WS ingestor finished
+        if item is None:  # sentinel — ingestor finished
             break
 
         text, is_final = item
@@ -266,6 +238,100 @@ async def _pump_transcript(
         _fire_check()
 
 
+# ── Layer 1: Gemini Live API pipe ─────────────────────────────────────────────
+
+async def _send_audio_to_gemini(
+    websocket: WebSocket,
+    gemini_session,
+    stop_event: asyncio.Event,
+) -> None:
+    """
+    Task A — Receive binary PCM frames from Flutter WS
+    and pipe them into the Gemini Live session.
+    Text frames are parsed for control messages (stop).
+    """
+    try:
+        while not stop_event.is_set():
+            message = await websocket.receive()
+
+            if message["type"] == "websocket.disconnect":
+                logger.info("Flutter WS disconnected during audio send")
+                break
+
+            if "bytes" in message and message["bytes"]:
+                # Binary frame → raw PCM audio → Gemini
+                await gemini_session.send_realtime_input(
+                    audio=genai_types.Blob(
+                        data=message["bytes"],
+                        mime_type="audio/pcm;rate=16000",
+                    )
+                )
+
+            elif "text" in message and message["text"]:
+                # Text frame → JSON control message
+                try:
+                    msg = json.loads(message["text"])
+                except json.JSONDecodeError:
+                    continue
+
+                if msg.get("type") == "stop":
+                    logger.info("Stop signal received from Flutter")
+                    break
+
+    except WebSocketDisconnect:
+        logger.info("Flutter WS disconnected during audio send")
+    except Exception as exc:
+        logger.exception("Audio send error: %s", exc)
+    finally:
+        stop_event.set()
+
+
+async def _recv_transcripts_from_gemini(
+    gemini_session,
+    queue: asyncio.Queue[tuple[str, bool] | None],
+    websocket: WebSocket,
+    stop_event: asyncio.Event,
+) -> None:
+    """
+    Task B — Listen to Gemini Live session for input_transcription events.
+    Push transcribed text into the Agent 1b queue.
+    Also forward transcript JSON back to Flutter for live UI.
+    """
+    try:
+        async for response in gemini_session.receive():
+            if stop_event.is_set():
+                break
+
+            sc = response.server_content
+            if not sc:
+                continue
+
+            # Input transcription — the ASR text of what the user said
+            if sc.input_transcription and sc.input_transcription.text:
+                text = sc.input_transcription.text.strip()
+                if text:
+                    logger.info("Gemini transcript: %r", text[:100])
+                    # Feed Agent 1b
+                    await queue.put((text, True))
+                    # Send to Flutter for live transcript display
+                    try:
+                        if websocket.client_state == WebSocketState.CONNECTED:
+                            await websocket.send_text(json.dumps({
+                                "type": "transcript",
+                                "text": text,
+                                "is_final": True,
+                            }))
+                    except Exception:
+                        pass
+
+    except Exception as exc:
+        if not stop_event.is_set():
+            logger.exception("Gemini receive error: %s", exc)
+    finally:
+        # Sentinel to signal pump_transcript to flush and exit
+        await queue.put(None)
+
+
 # ── WebSocket handler ──────────────────────────────────────────────────────────
 
 @router.websocket("/ws/live-audit")
@@ -276,19 +342,46 @@ async def live_audit_ws(websocket: WebSocket):
     queue: asyncio.Queue[tuple[str, bool] | None] = asyncio.Queue()
     context = ContextWindow()
     pending_tasks: set[asyncio.Task] = set()
+    stop_event = asyncio.Event()
+
+    client = _get_gemini_client()
 
     try:
-        # Run Agent 1a and Agent 1b concurrently
-        await asyncio.gather(
-            _ingest_ws(websocket, queue),
-            _pump_transcript(queue, context, websocket, pending_tasks),
-        )
+        async with client.aio.live.connect(
+            model=_GEMINI_MODEL,
+            config=_GEMINI_LIVE_CONFIG,
+        ) as gemini_session:
+            logger.info("Gemini Live session opened (model=%s)", _GEMINI_MODEL)
+
+            try:
+                # Run all three concurrent tasks
+                await asyncio.gather(
+                    _send_audio_to_gemini(websocket, gemini_session, stop_event),
+                    _recv_transcripts_from_gemini(
+                        gemini_session, queue, websocket, stop_event
+                    ),
+                    _pump_transcript(queue, context, websocket, pending_tasks),
+                )
+            except Exception as exc:
+                logger.exception("Live Audit pipeline error: %s", exc)
+                try:
+                    if websocket.client_state == WebSocketState.CONNECTED:
+                        await websocket.send_text(
+                            json.dumps({"type": "error", "message": str(exc)})
+                        )
+                except Exception:
+                    pass
+
     except Exception as exc:
-        logger.exception("Live Audit WS error: %s", exc)
+        logger.exception("Gemini Live session failed to open: %s", exc)
         try:
-            await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.send_text(
+                    json.dumps({"type": "error", "message": f"Gemini connection failed: {exc}"})
+                )
         except Exception:
             pass
+
     finally:
         # Wait for all in-flight fact-check tasks
         if pending_tasks:
@@ -296,7 +389,8 @@ async def live_audit_ws(websocket: WebSocket):
             await asyncio.gather(*list(pending_tasks), return_exceptions=True)
 
         try:
-            await websocket.send_text(json.dumps({"type": "done"}))
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.send_text(json.dumps({"type": "done"}))
         except Exception:
             pass
 
