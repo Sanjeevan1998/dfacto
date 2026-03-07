@@ -1,12 +1,11 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
 import '../../navigation/app_shell.dart';
 import 'models/fact_check_result.dart';
 import 'models/transcript_segment.dart';
-import 'services/speech_service.dart';
+import 'services/audio_service.dart';
+import 'services/websocket_service.dart';
 import 'widgets/listen_button.dart';
 import 'widgets/waveform_visualizer.dart';
 import 'widgets/live_transcript_panel.dart';
@@ -21,133 +20,164 @@ class LiveAuditScreen extends StatefulWidget {
 
 class _LiveAuditScreenState extends State<LiveAuditScreen> {
   bool _isListening = false;
-  bool _isChecking = false;
+  bool _isStopping = false; // true while awaiting backend "done" after Stop
 
   final List<TranscriptSegment> _segments = [];
   final List<FactCheckResult> _results = [];
+
+  // Live partial text: accumulates Gemini transcript tokens word-by-word.
+  // Cleared and committed to _segments when a fact-check result arrives,
+  // or when the session ends.
   String _partialText = '';
 
-  final _speech = SpeechService.instance;
-  final _textController = TextEditingController();
+  final _audio = AudioService.instance;
+  final _ws = WebSocketService.instance;
 
-  // ── Toggle mic ────────────────────────────────────────────────────────────
+  StreamSubscription<dynamic>? _audioSub;
+  StreamSubscription<dynamic>? _transcriptSub;
+  StreamSubscription<dynamic>? _resultSub;
+  StreamSubscription<dynamic>? _doneSub;
+
+  // ── Session control ────────────────────────────────────────────────────────
+
+  Future<void> _startListening() async {
+    // 1. Start raw PCM recording
+    final audioStream = await _audio.startRecording();
+    if (audioStream == null) {
+      // Permission denied or hardware error
+      return;
+    }
+
+    // 2. Connect WebSocket to backend
+    _ws.connect();
+
+    // 3. Subscribe to transcript tokens → append word-by-word to partial text
+    _transcriptSub = _ws.transcriptStream?.listen((event) {
+      if (!mounted) return;
+      setState(() => _partialText += event.text);
+    });
+
+    // 4. Subscribe to fact-check results
+    //    When a result arrives, commit the accumulated partial text as a
+    //    completed segment and clear the partial for the next window.
+    _resultSub = _ws.resultStream?.listen((result) {
+      if (!mounted) return;
+      setState(() {
+        // Snapshot the partial text that produced this claim
+        final segText = _partialText.trim();
+        _partialText = '';
+
+        if (segText.isNotEmpty) {
+          _segments.add(TranscriptSegment(
+            id: DateTime.now().toIso8601String(),
+            text: segText,
+            claim: result.claimText,
+            result: result,
+          ));
+        }
+        _results.insert(0, result);
+      });
+    });
+
+    // 5. Subscribe to "done" — backend finished flushing after Stop
+    _doneSub = _ws.doneStream?.listen((_) {
+      if (!mounted) return;
+      _finalizeSession();
+    });
+
+    // 6. Stream PCM chunks to backend via WebSocket
+    _audioSub = audioStream.listen((chunk) {
+      _ws.sendAudioChunk(chunk);
+    });
+
+    setState(() {
+      _isListening = true;
+      _isStopping = false;
+    });
+  }
+
+  Future<void> _stopListening() async {
+    setState(() {
+      _isListening = false;
+      _isStopping = true;
+    });
+
+    // Stop recording first so no more audio chunks are produced
+    await _audio.stopRecording();
+    _audioSub?.cancel();
+    _audioSub = null;
+
+    // Send stop signal to backend — it will flush the buffer and send "done"
+    _ws.sendStop();
+
+    // _doneSub will call _finalizeSession() when backend responds with "done".
+    // Safety timeout: if backend doesn't respond in 10s, finalize anyway.
+    Future.delayed(const Duration(seconds: 10), () {
+      if (mounted && _isStopping) _finalizeSession();
+    });
+  }
+
+  void _finalizeSession() {
+    if (!mounted) return;
+
+    // Cancel all subscriptions
+    _transcriptSub?.cancel();
+    _resultSub?.cancel();
+    _doneSub?.cancel();
+    _transcriptSub = null;
+    _resultSub = null;
+    _doneSub = null;
+
+    // Commit any remaining partial text as a segment (no result yet)
+    final remaining = _partialText.trim();
+    setState(() {
+      if (remaining.isNotEmpty) {
+        _segments.add(TranscriptSegment(
+          id: DateTime.now().toIso8601String(),
+          text: remaining,
+          claim: '',
+        ));
+      }
+      _partialText = '';
+      _isStopping = false;
+    });
+
+    _ws.disconnect();
+  }
 
   Future<void> _toggleListening() async {
     if (_isListening) {
-      await _speech.stop();
-      setState(() {
-        _isListening = false;
-        _partialText = '';
-      });
+      await _stopListening();
     } else {
-      await _speech.start(
-        onPartial: (partial) {
-          if (mounted) setState(() => _partialText = partial);
-        },
-        onFinal: (phrase) {
-          if (!mounted || phrase.trim().isEmpty) return;
-          setState(() {
-            _partialText = '';
-            _segments.add(TranscriptSegment(
-              id: DateTime.now().toIso8601String(),
-              text: phrase,
-              claim: '',
-            ));
-          });
-        },
-      );
-      setState(() => _isListening = true);
+      await _startListening();
     }
   }
 
-
-  // ── Fact-check via /debug/check ───────────────────────────────────────────
-
-  Future<void> _factCheck(TranscriptSegment seg) async {
-    try {
-      final uri = Uri.parse('http://192.168.1.158:8000/debug/check');
-      final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 10)
-        ..idleTimeout = const Duration(seconds: 50);
-
-      final result = await Future.any([
-        _doFactCheck(client, uri, seg),
-        Future.delayed(const Duration(seconds: 50), () => 'timeout'),
-      ]);
-
-      if (result == 'timeout' && mounted) {
-        setState(() => seg.error = 'Timed out');
-      }
-    } catch (e) {
-      if (mounted) setState(() => seg.error = 'Error: $e');
-    }
-  }
-
-  Future<Object?> _doFactCheck(
-      HttpClient client, Uri uri, TranscriptSegment seg) async {
-    try {
-      final request = await client.postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'claim': seg.claim}));
-      final response = await request.close();
-      final body = await response.transform(utf8.decoder).join();
-      client.close();
-
-      if (response.statusCode == 200 && mounted) {
-        final json = jsonDecode(body) as Map<String, dynamic>;
-        if (json.containsKey('claimText')) {
-          final result = FactCheckResult.fromJson(json);
-          setState(() {
-            seg.result = result;
-            _results.insert(0, result);
-          });
-        }
-      } else if (mounted) {
-        setState(() => seg.error = 'HTTP ${response.statusCode}');
-      }
-    } catch (e) {
-      if (mounted) setState(() => seg.error = e.toString());
-    }
-    return null;
-  }
-
-  // ── Text debug input ──────────────────────────────────────────────────────
-
-  Future<void> _submitTextClaim() async {
-    final claim = _textController.text.trim();
-    if (claim.isEmpty) return;
-    setState(() => _isChecking = true);
-    _textController.clear();
-
-    final seg = TranscriptSegment(
-      id: DateTime.now().toIso8601String(),
-      text: claim,
-      claim: claim,
-    );
-    setState(() => _segments.add(seg));
-    await _factCheck(seg);
-    if (mounted) setState(() => _isChecking = false);
-  }
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   @override
   void dispose() {
-    _speech.cancel();
-    _textController.dispose();
+    _audio.stopRecording();
+    _audioSub?.cancel();
+    _transcriptSub?.cancel();
+    _resultSub?.cancel();
+    _doneSub?.cancel();
+    _ws.disconnect();
     super.dispose();
   }
 
-  // ── Build ─────────────────────────────────────────────────────────────────
+  // ── Build ──────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
-    // Produce display segments: completed ones + a live partial segment at end
+    // Show completed segments + a live partial segment at the bottom
     final displaySegments = [
       ..._segments,
       if (_partialText.isNotEmpty)
         TranscriptSegment(
           id: '__partial__',
           text: _partialText,
-          claim: '',     // no claim yet — partial results never trigger fact-check
+          claim: '',
         ),
     ];
 
@@ -156,7 +186,7 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // ── Header ─────────────────────────────────────────────────────
+            // ── Header ───────────────────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
               child: Row(
@@ -172,7 +202,7 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
                     ],
                   ),
                   const Spacer(),
-                  _StatusChip(isListening: _isListening),
+                  _StatusChip(isListening: _isListening, isStopping: _isStopping),
                   const SizedBox(width: 10),
                   const ThemeToggleButton(),
                 ],
@@ -180,7 +210,7 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
             ),
             const SizedBox(height: 16),
 
-            // ── Waveform + Mic button ───────────────────────────────────────
+            // ── Waveform + Mic button ─────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Container(
@@ -200,66 +230,24 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
                     ),
                     Padding(
                       padding: const EdgeInsets.only(right: 16),
-                      child: ListenButton(
-                        isListening: _isListening,
-                        onTap: _toggleListening,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 10),
-
-            // ── Text debug input ────────────────────────────────────────────
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: context.surfaceHigh,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: context.border, width: 1),
-                ),
-                child: Row(
-                  children: [
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: TextField(
-                        controller: _textController,
-                        style: DfactoTextStyles.bodyMedium(context.textPrimary),
-                        decoration: InputDecoration(
-                          hintText: 'Or type a claim to fact-check…',
-                          hintStyle: DfactoTextStyles.bodyMedium(context.textMuted),
-                          border: InputBorder.none,
-                          isDense: true,
-                          contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (_) => _submitTextClaim(),
-                      ),
-                    ),
-                    _isChecking
-                        ? Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: SizedBox(
-                              width: 18, height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2, color: context.accent),
+                      child: _isStopping
+                          ? const SizedBox(
+                              width: 44,
+                              height: 44,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : ListenButton(
+                              isListening: _isListening,
+                              onTap: _toggleListening,
                             ),
-                          )
-                        : IconButton(
-                            onPressed: _submitTextClaim,
-                            icon: Icon(Icons.send_rounded,
-                                color: context.accent, size: 20),
-                            padding: const EdgeInsets.all(10),
-                          ),
+                    ),
                   ],
                 ),
               ),
             ),
             const SizedBox(height: 10),
 
-            // ── Live Transcript ─────────────────────────────────────────────
+            // ── Live Transcript ───────────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Row(
@@ -302,7 +290,7 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
             ),
             const SizedBox(height: 10),
 
-            // ── Fact-Check Cards ────────────────────────────────────────────
+            // ── Fact-Check Cards ──────────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Row(
@@ -311,7 +299,11 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
                       style: DfactoTextStyles.headlineMedium(context.textPrimary)),
                   const Spacer(),
                   Text(
-                    _isListening ? 'Live' : 'Paused',
+                    _isListening
+                        ? 'Live'
+                        : _isStopping
+                            ? 'Processing…'
+                            : 'Paused',
                     style: _isListening
                         ? DfactoTextStyles.bodySmall(DfactoColors.verdictTrue)
                         : DfactoTextStyles.bodySmall(context.textMuted),
@@ -335,41 +327,45 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 // ── Status chip ───────────────────────────────────────────────────────────────
 
 class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.isListening});
+  const _StatusChip({required this.isListening, required this.isStopping});
   final bool isListening;
+  final bool isStopping;
 
   @override
   Widget build(BuildContext context) {
+    final label = isListening ? 'HOT MIC' : isStopping ? 'PROCESSING' : 'IDLE';
+    final active = isListening || isStopping;
+    final color = isListening
+        ? DfactoColors.verdictTrue
+        : isStopping
+            ? DfactoColors.verdictMixed
+            : context.textMuted;
+
     return AnimatedContainer(
       duration: const Duration(milliseconds: 400),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: isListening
-            ? DfactoColors.verdictTrue.withValues(alpha: 0.12)
+        color: active
+            ? color.withValues(alpha: 0.12)
             : context.surfaceHigh,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: isListening
-              ? DfactoColors.verdictTrue.withValues(alpha: 0.35)
-              : context.border,
+          color: active ? color.withValues(alpha: 0.35) : context.border,
           width: 1,
         ),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         AnimatedContainer(
           duration: const Duration(milliseconds: 400),
-          width: 6, height: 6,
+          width: 6,
+          height: 6,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: isListening ? DfactoColors.verdictTrue : context.textMuted,
+            color: active ? color : context.textMuted,
           ),
         ),
         const SizedBox(width: 5),
-        Text(
-          isListening ? 'HOT MIC' : 'IDLE',
-          style: DfactoTextStyles.labelBold(
-              isListening ? DfactoColors.verdictTrue : context.textMuted),
-        ),
+        Text(label, style: DfactoTextStyles.labelBold(active ? color : context.textMuted)),
       ]),
     );
   }
