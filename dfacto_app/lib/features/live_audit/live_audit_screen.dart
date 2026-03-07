@@ -1,10 +1,9 @@
 import 'dart:async';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
 import '../../navigation/app_shell.dart';
 import 'models/fact_check_result.dart';
-import 'services/audio_service.dart';
+import 'services/native_stt_service.dart';
 import 'services/websocket_service.dart';
 import 'widgets/listen_button.dart';
 import 'widgets/waveform_visualizer.dart';
@@ -22,24 +21,20 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
   bool _isListening = false;
   bool _isStopping = false;
 
-  // Granola-style transcript: all finalised words in one growing string.
   String _committedText = '';
   String _partialText = '';
 
   final List<FactCheckResult> _results = [];
 
-  final _audio = AudioService.instance;
+  final _stt = NativeSTTService.instance;
   final _ws = WebSocketService.instance;
 
   StreamSubscription<dynamic>? _resultSub;
   StreamSubscription<dynamic>? _doneSub;
-  StreamSubscription<Map<String, dynamic>>? _transcriptSub;
-  StreamSubscription<Uint8List>? _audioSub;
 
   // ── Session control ────────────────────────────────────────────────────────
 
   Future<void> _startListening() async {
-    // Connect WebSocket first — fact-check results & transcripts come back here.
     _ws.connect();
 
     _resultSub = _ws.resultStream?.listen((result) {
@@ -52,36 +47,36 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
       _finalizeSession();
     });
 
-    // Subscribe to transcript events from backend (Gemini Live API ASR).
-    _transcriptSub = _ws.transcriptStream?.listen((event) {
-      if (!mounted) return;
-      final text = event['text'] as String? ?? '';
-      final isFinal = event['is_final'] as bool? ?? true;
-      if (text.isEmpty) return;
-
-      setState(() {
-        if (isFinal) {
-          _committedText = _committedText.isEmpty
-              ? text
-              : '$_committedText $text';
+    // Start on-device ML Kit GenAI STT via Kotlin EventChannel.
+    _stt.start(
+      onTranscript: (String text) {
+        if (!mounted) return;
+        setState(() {
+          _committedText = _committedText.isEmpty ? text : '$_committedText $text';
           _partialText = '';
-        } else {
-          _partialText = text;
-        }
-      });
-    });
-
-    // Start raw audio capture and pipe bytes to backend via WebSocket.
-    final audioStream = await _audio.startRecording();
-    if (audioStream == null) {
-      // Permission denied or recorder failed
-      _ws.disconnect();
-      return;
-    }
-
-    _audioSub = audioStream.listen((Uint8List bytes) {
-      _ws.sendAudioBytes(bytes);
-    });
+        });
+        // Forward transcription text to the backend.
+        _ws.sendTranscriptText(text, isFinal: true);
+      },
+      onError: (String code, String message) {
+        if (!mounted) return;
+        // Show a snackbar for recognized error codes.
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              code == 'UNAVAILABLE'
+                  ? 'On-device GenAI STT not available on this device.'
+                  : 'Speech recognition error ($code): $message',
+            ),
+            backgroundColor: DfactoColors.verdictFalse,
+          ),
+        );
+        setState(() {
+          _isListening = false;
+          _isStopping = false;
+        });
+      },
+    );
 
     setState(() {
       _isListening = true;
@@ -95,15 +90,10 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
       _isStopping = true;
     });
 
-    // Stop audio capture first.
-    _audioSub?.cancel();
-    _audioSub = null;
-    await _audio.stopRecording();
-
-    // Tell backend to flush its buffer and send "done".
+    _stt.stop();
     _ws.sendStop();
 
-    // Safety timeout: finalize if backend doesn't respond in 30s.
+    // Safety timeout in case backend doesn't send "done".
     Future.delayed(const Duration(seconds: 30), () {
       if (mounted && _isStopping) _finalizeSession();
     });
@@ -111,16 +101,10 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
   void _finalizeSession() {
     if (!mounted) return;
-
     _resultSub?.cancel();
     _doneSub?.cancel();
-    _transcriptSub?.cancel();
-    _audioSub?.cancel();
     _resultSub = null;
     _doneSub = null;
-    _transcriptSub = null;
-    _audioSub = null;
-
     setState(() => _isStopping = false);
     _ws.disconnect();
   }
@@ -137,11 +121,9 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
   @override
   void dispose() {
-    _audioSub?.cancel();
-    _audio.stopRecording();
+    _stt.stop();
     _resultSub?.cancel();
     _doneSub?.cancel();
-    _transcriptSub?.cancel();
     _ws.disconnect();
     super.dispose();
   }
@@ -317,9 +299,7 @@ class _StatusChip extends StatelessWidget {
       duration: const Duration(milliseconds: 400),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: active
-            ? color.withValues(alpha: 0.12)
-            : context.surfaceHigh,
+        color: active ? color.withValues(alpha: 0.12) : context.surfaceHigh,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
           color: active ? color.withValues(alpha: 0.35) : context.border,
@@ -337,7 +317,8 @@ class _StatusChip extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 5),
-        Text(label, style: DfactoTextStyles.labelBold(active ? color : context.textMuted)),
+        Text(label,
+            style: DfactoTextStyles.labelBold(active ? color : context.textMuted)),
       ]),
     );
   }
