@@ -1,9 +1,10 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
 import '../../navigation/app_shell.dart';
 import 'models/fact_check_result.dart';
-import 'services/speech_service.dart';
+import 'services/audio_service.dart';
 import 'services/websocket_service.dart';
 import 'widgets/listen_button.dart';
 import 'widgets/waveform_visualizer.dart';
@@ -27,16 +28,18 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
   final List<FactCheckResult> _results = [];
 
-  final _speech = SpeechService.instance;
+  final _audio = AudioService.instance;
   final _ws = WebSocketService.instance;
 
   StreamSubscription<dynamic>? _resultSub;
   StreamSubscription<dynamic>? _doneSub;
+  StreamSubscription<Map<String, dynamic>>? _transcriptSub;
+  StreamSubscription<Uint8List>? _audioSub;
 
   // ── Session control ────────────────────────────────────────────────────────
 
   Future<void> _startListening() async {
-    // Connect WebSocket first — fact-check results come back on this channel.
+    // Connect WebSocket first — fact-check results & transcripts come back here.
     _ws.connect();
 
     _resultSub = _ws.resultStream?.listen((result) {
@@ -49,25 +52,36 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
       _finalizeSession();
     });
 
-    // Start on-device STT — word-by-word partial + final utterance callbacks.
-    await _speech.start(
-      onPartial: (partial) {
-        if (!mounted) return;
-        setState(() => _partialText = partial);
-      },
-      onFinal: (finalWords) {
-        if (!mounted) return;
-        setState(() {
-          // Append to the continuous committed transcript.
+    // Subscribe to transcript events from backend (Gemini Live API ASR).
+    _transcriptSub = _ws.transcriptStream?.listen((event) {
+      if (!mounted) return;
+      final text = event['text'] as String? ?? '';
+      final isFinal = event['is_final'] as bool? ?? true;
+      if (text.isEmpty) return;
+
+      setState(() {
+        if (isFinal) {
           _committedText = _committedText.isEmpty
-              ? finalWords
-              : '$_committedText $finalWords';
+              ? text
+              : '$_committedText $text';
           _partialText = '';
-        });
-        // Send the final utterance to the backend for claim detection + fact-check.
-        _ws.sendTranscriptText(finalWords, isFinal: true);
-      },
-    );
+        } else {
+          _partialText = text;
+        }
+      });
+    });
+
+    // Start raw audio capture and pipe bytes to backend via WebSocket.
+    final audioStream = await _audio.startRecording();
+    if (audioStream == null) {
+      // Permission denied or recorder failed
+      _ws.disconnect();
+      return;
+    }
+
+    _audioSub = audioStream.listen((Uint8List bytes) {
+      _ws.sendAudioBytes(bytes);
+    });
 
     setState(() {
       _isListening = true;
@@ -81,19 +95,10 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
       _isStopping = true;
     });
 
-    await _speech.stop();
-
-    // Flush any remaining partial text as a final utterance.
-    final remaining = _partialText.trim();
-    if (remaining.isNotEmpty) {
-      setState(() {
-        _committedText = _committedText.isEmpty
-            ? remaining
-            : '$_committedText $remaining';
-        _partialText = '';
-      });
-      _ws.sendTranscriptText(remaining, isFinal: true);
-    }
+    // Stop audio capture first.
+    _audioSub?.cancel();
+    _audioSub = null;
+    await _audio.stopRecording();
 
     // Tell backend to flush its buffer and send "done".
     _ws.sendStop();
@@ -109,8 +114,12 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
     _resultSub?.cancel();
     _doneSub?.cancel();
+    _transcriptSub?.cancel();
+    _audioSub?.cancel();
     _resultSub = null;
     _doneSub = null;
+    _transcriptSub = null;
+    _audioSub = null;
 
     setState(() => _isStopping = false);
     _ws.disconnect();
@@ -128,9 +137,11 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
   @override
   void dispose() {
-    _speech.stop();
+    _audioSub?.cancel();
+    _audio.stopRecording();
     _resultSub?.cancel();
     _doneSub?.cancel();
+    _transcriptSub?.cancel();
     _ws.disconnect();
     super.dispose();
   }
