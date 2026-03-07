@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+langchain
+langchain-google-genai
+langgraph
+duckduckgo-search
+apscheduler
+pydantic
+python-dotenv
+langchain-communitypraw
+newsapi-python
+tavily-python
