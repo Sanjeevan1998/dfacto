@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/fact_check_result.dart';
 
@@ -10,6 +11,7 @@ class WebSocketService {
   WebSocketChannel? _channel;
   StreamController<FactCheckResult>? _resultController;
   StreamController<void>? _doneController;
+  StreamController<Map<String, dynamic>>? _transcriptController;
   bool _isConnected = false;
 
   bool get isConnected => _isConnected;
@@ -19,11 +21,16 @@ class WebSocketService {
   /// Emits once when the backend sends {"type":"done"} after Stop + flush.
   Stream<void>? get doneStream => _doneController?.stream;
 
+  /// Emits transcript events from backend: {"text":"...","is_final":true}
+  Stream<Map<String, dynamic>>? get transcriptStream =>
+      _transcriptController?.stream;
+
   /// Connect to the FastAPI WebSocket endpoint.
   void connect({String host = '192.168.1.158', int port = 8000}) {
     final uri = Uri.parse('ws://$host:$port/ws/live-audit');
     _resultController = StreamController<FactCheckResult>.broadcast();
     _doneController = StreamController<void>.broadcast();
+    _transcriptController = StreamController<Map<String, dynamic>>.broadcast();
     _channel = WebSocketChannel.connect(uri);
     _isConnected = true;
 
@@ -37,6 +44,9 @@ class WebSocketService {
             case 'result':
               final result = FactCheckResult.fromJson(json);
               _resultController?.add(result);
+
+            case 'transcript':
+              _transcriptController?.add(json);
 
             case 'done':
               _doneController?.add(null);
@@ -58,8 +68,16 @@ class WebSocketService {
         _isConnected = false;
         _resultController?.close();
         _doneController?.close();
+        _transcriptController?.close();
       },
     );
+  }
+
+  /// Send raw PCM audio bytes as a binary WebSocket frame.
+  void sendAudioBytes(Uint8List bytes) {
+    if (_isConnected && _channel != null && bytes.isNotEmpty) {
+      _channel!.sink.add(bytes);
+    }
   }
 
   /// Send a transcript text chunk to the backend for claim detection.
@@ -87,8 +105,10 @@ class WebSocketService {
     await _channel?.sink.close();
     await _resultController?.close();
     await _doneController?.close();
+    await _transcriptController?.close();
     _channel = null;
     _resultController = null;
     _doneController = null;
+    _transcriptController = null;
   }
 }

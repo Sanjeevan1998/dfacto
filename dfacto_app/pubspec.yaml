@@ -36,7 +36,6 @@ dependencies:
   google_fonts: ^6.2.1
   flutter_riverpod: ^2.6.1
   url_launcher: ^6.3.1
-  speech_to_text: ^7.3.0
   http: ^1.6.0
 
 

@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
 import '../../navigation/app_shell.dart';
 import 'models/fact_check_result.dart';
-import 'models/transcript_segment.dart';
 import 'services/speech_service.dart';
 import 'services/websocket_service.dart';
 import 'widgets/listen_button.dart';
@@ -22,12 +21,11 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
   bool _isListening = false;
   bool _isStopping = false;
 
-  final List<TranscriptSegment> _segments = [];
-  final List<FactCheckResult> _results = [];
-
-  // Live partial text: updated word-by-word as the OS STT recognises speech.
-  // On a final result it is committed to _segments and cleared.
+  // Granola-style transcript: all finalised words in one growing string.
+  String _committedText = '';
   String _partialText = '';
+
+  final List<FactCheckResult> _results = [];
 
   final _speech = SpeechService.instance;
   final _ws = WebSocketService.instance;
@@ -43,15 +41,7 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
     _resultSub = _ws.resultStream?.listen((result) {
       if (!mounted) return;
-      setState(() {
-        // Attach result to the most recent un-checked segment that has a claim.
-        // If none, just append the result to the feed.
-        final idx = _segments.lastIndexWhere((s) => s.hasClaim && !s.isChecked);
-        if (idx != -1) {
-          _segments[idx].result = result;
-        }
-        _results.insert(0, result);
-      });
+      setState(() => _results.insert(0, result));
     });
 
     _doneSub = _ws.doneStream?.listen((_) {
@@ -68,12 +58,10 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
       onFinal: (finalWords) {
         if (!mounted) return;
         setState(() {
-          // Commit the utterance as a completed segment.
-          _segments.add(TranscriptSegment(
-            id: DateTime.now().toIso8601String(),
-            text: finalWords,
-            claim: '',
-          ));
+          // Append to the continuous committed transcript.
+          _committedText = _committedText.isEmpty
+              ? finalWords
+              : '$_committedText $finalWords';
           _partialText = '';
         });
         // Send the final utterance to the backend for claim detection + fact-check.
@@ -99,11 +87,9 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
     final remaining = _partialText.trim();
     if (remaining.isNotEmpty) {
       setState(() {
-        _segments.add(TranscriptSegment(
-          id: DateTime.now().toIso8601String(),
-          text: remaining,
-          claim: '',
-        ));
+        _committedText = _committedText.isEmpty
+            ? remaining
+            : '$_committedText $remaining';
         _partialText = '';
       });
       _ws.sendTranscriptText(remaining, isFinal: true);
@@ -153,15 +139,7 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final displaySegments = [
-      ..._segments,
-      if (_partialText.isNotEmpty)
-        TranscriptSegment(
-          id: '__partial__',
-          text: _partialText,
-          claim: '',
-        ),
-    ];
+    final hasTranscript = _committedText.isNotEmpty || _partialText.isNotEmpty;
 
     return Scaffold(
       backgroundColor: context.bg,
@@ -237,10 +215,10 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
                   Text('Live Transcript',
                       style: DfactoTextStyles.headlineMedium(context.textPrimary)),
                   const Spacer(),
-                  if (displaySegments.isNotEmpty)
+                  if (hasTranscript || _results.isNotEmpty)
                     GestureDetector(
                       onTap: () => setState(() {
-                        _segments.clear();
+                        _committedText = '';
                         _results.clear();
                         _partialText = '';
                       }),
@@ -264,7 +242,8 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(16),
                   child: LiveTranscriptPanel(
-                    segments: displaySegments,
+                    committedText: _committedText,
+                    partialText: _partialText,
                     isListening: _isListening,
                   ),
                 ),
