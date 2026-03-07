@@ -7,8 +7,9 @@ This is the frontend application for Dfacto, built using Flutter. It provides a 
 The application uses a bottom navigation bar with the following sections:
 
 1. **Crawler (`HomeScreen`)**: The main dashboard that displays real-time headlines and data extracted by the backend crawler. It integrates with the FastAPI backend to fetch limits and trigger crawls manually.
+   - **Fact-Checking UI**: Headlines now display dynamically colored verdict chips (TRUE, FALSE, MIXED) and confidence scores provided by the backend's "Brain" pipeline. Expanding a card shows a synthesized 1-sentence explanation of the verdict.
 2. **Audit (Phase 1)**: *(Work in Progress)* Designed for live audio auditing.
-3. **Verify (Phase 2)**: *(Work in Progress)* Interface to verify specific claims.
+3. **Verify (Phase 2)**: *(Work in Progress)* Dedicated interface to verify specific targeted claims outside the background crawler.
 4. **Settings**: Configuration settings for the app and crawler backend.
 
 ## Architecture

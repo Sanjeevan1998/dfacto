@@ -37,6 +37,9 @@ class Headline(BaseModel):
     source: str
     url: str
     snippet: str
+    verdict: str
+    confidence_score: float
+    explanation: str
     timestamp: str
 
 @app.get("/config")

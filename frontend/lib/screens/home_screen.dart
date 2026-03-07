@@ -188,18 +188,76 @@ class _HomeScreenState extends State<HomeScreen> {
                                       ),
                                     ),
                                   ),
-                                Card(
-                                  margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
-                                  child: ListTile(
-                                    title: Text(item['title'] ?? 'No Title'),
-                                    subtitle: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(item['source'] ?? 'Unknown Source', style: const TextStyle(fontWeight: FontWeight.bold)),
-                                        if (item['snippet'] != null && item['snippet'].toString().isNotEmpty)
-                                          Text(item['snippet']!, maxLines: 2, overflow: TextOverflow.ellipsis),
-                                        Text(item['timestamp'] ?? '', style: const TextStyle(fontSize: 10, color: Colors.grey)),
-                                      ],
+                                  Card(
+                                    margin: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
+                                    clipBehavior: Clip.antiAlias,
+                                    child: InkWell(
+                                      onTap: () => _showDetailsDialog(context, item),
+                                      child: Padding(
+                                        padding: const EdgeInsets.all(12.0),
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            item['title'] ?? 'No Title',
+                                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Row(
+                                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                            children: [
+                                              Text(item['source'] ?? 'Unknown Source', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                                              if (item['verdict'] != null && item['verdict'] != 'N/A')
+                                                Chip(
+                                                  label: Text(
+                                                    '${item['verdict']}',
+                                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                                                  ),
+                                                  // Colors dynamically change based on verdict
+                                                  backgroundColor: item['verdict'] == 'TRUE'
+                                                      ? Colors.green.withOpacity(0.2)
+                                                      : item['verdict'] == 'FALSE'
+                                                          ? Colors.red.withOpacity(0.2)
+                                                          : item['verdict'] == 'MIXED'
+                                                            ? Colors.orange.withOpacity(0.2)
+                                                            : Colors.grey.withOpacity(0.2),
+                                                  side: BorderSide.none,
+                                                  padding: EdgeInsets.zero,
+                                                )
+                                            ],
+                                          ),
+                                          if (item['snippet'] != null && item['snippet'].toString().isNotEmpty)
+                                            Padding(
+                                              padding: const EdgeInsets.symmetric(vertical: 4.0),
+                                              child: Text(item['snippet']!, maxLines: 2, overflow: TextOverflow.ellipsis),
+                                            ),
+                                          if (item['explanation'] != null && item['explanation'].toString().isNotEmpty)
+                                            Container(
+                                              margin: const EdgeInsets.only(top: 8.0, bottom: 4.0),
+                                              padding: const EdgeInsets.all(8.0),
+                                              decoration: BoxDecoration(
+                                                color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.5),
+                                                borderRadius: BorderRadius.circular(8.0),
+                                                border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+                                              ),
+                                              child: Row(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  const Icon(Icons.info_outline, size: 16, color: Colors.blueAccent),
+                                                  const SizedBox(width: 8),
+                                                  Expanded(
+                                                    child: Text(
+                                                      item['explanation']!,
+                                                      style: const TextStyle(fontSize: 13, fontStyle: FontStyle.italic),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          const SizedBox(height: 4),
+                                          Text(item['timestamp'] ?? '', style: const TextStyle(fontSize: 10, color: Colors.grey)),
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -210,6 +268,78 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ],
             ),
+    );
+  }
+
+  void _showDetailsDialog(BuildContext context, dynamic item) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(item['title'] ?? 'No Title'),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (item['source'] != null)
+                  Text('Source: ${item['source']}', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                const SizedBox(height: 8),
+                if (item['snippet'] != null && item['snippet'].toString().isNotEmpty)
+                  Text(item['snippet']!),
+                const SizedBox(height: 12),
+                if (item['explanation'] != null && item['explanation'].toString().isNotEmpty) ...[
+                  const Text('Explanation:', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12.0),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.5),
+                      borderRadius: BorderRadius.circular(8.0),
+                      border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+                    ),
+                    child: Text(
+                      item['explanation']!,
+                      style: const TextStyle(fontSize: 14, fontStyle: FontStyle.italic),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                if (item['timestamp'] != null)
+                  Text('Timestamp: ${item['timestamp']}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 12),
+                if (item['verdict'] != null && item['verdict'] != 'N/A')
+                  Row(
+                    children: [
+                      const Text('Verdict: ', style: TextStyle(fontWeight: FontWeight.bold)),
+                      Chip(
+                        label: Text(
+                          '${item['verdict']}',
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                        ),
+                        backgroundColor: item['verdict'] == 'TRUE'
+                            ? Colors.green.withOpacity(0.2)
+                            : item['verdict'] == 'FALSE'
+                                ? Colors.red.withOpacity(0.2)
+                                : item['verdict'] == 'MIXED'
+                                  ? Colors.orange.withOpacity(0.2)
+                                  : Colors.grey.withOpacity(0.2),
+                        side: BorderSide.none,
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
     );
   }
 }
