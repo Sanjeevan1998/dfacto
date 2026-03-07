@@ -1,28 +1,37 @@
 """
-WebSocket router — Live Audit pipeline (Phase 3: Gemini Live API).
+WebSocket router — Live Audit pipeline.
 
 Route: WS /ws/live-audit
 
 Protocol
 --------
-Flutter → Backend  : binary  PCM frames (16 kHz, 16-bit mono LE), streamed continuously
-Flutter → Backend  : text    {"type":"stop"}   when user presses Stop
-Backend → Flutter  : text    {"type":"transcript","text":"<token>","isPartial":true}
-Backend → Flutter  : text    {"type":"result",...}   FactCheckResult when a claim is verified
-Backend → Flutter  : text    {"type":"done"}          after buffer flush on Stop
-Backend → Flutter  : text    {"type":"error","message":"..."}  on fatal session error
+Flutter → Backend  : text  {"type":"transcript_text","text":"...","isFinal":true/false}
+Flutter → Backend  : text  {"type":"stop"}
+Backend → Flutter  : text  {"type":"result",...}   FactCheckResult when claim verified
+Backend → Flutter  : text  {"type":"done"}          after stop + all tasks finish
+Backend → Flutter  : text  {"type":"error","message":"..."}  on fatal error
 
-Architecture
+Architecture (3 concurrent layers)
 ------------
-1. Open a Gemini Live session (native audio model) in transcription-only mode.
-2. pump_audio(): receive PCM from Flutter → forward to Gemini in real-time.
-3. pump_transcript(): receive transcript tokens from Gemini → send to Flutter immediately
-   AND accumulate in a rolling 25-word buffer.
-4. Every 25 new words (max 50), run claim_classifier:
-   - is_claim + no context needed → run_pipeline_from_claim → send result to Flutter,
-     reset buffer keeping last 5 words for continuity.
-   - otherwise → keep accumulating, try again at next 25-word increment.
-5. On {"type":"stop"}: drain remaining Gemini tokens (2s grace), flush buffer, send "done".
+Layer 1 — Device STT (Flutter, on-device)
+    speech_to_text package transcribes audio word-by-word on the device.
+    Partial results → live display in UI instantly (no backend round-trip).
+    Final results (utterance complete) → sent to backend via WebSocket.
+
+Layer 2 — TranscriptBuffer (Backend, this file)
+    Receives final utterance texts from Flutter.
+    Accumulates in rolling buffer.
+    Fires Layer 3 as a background task when:
+        a) An utterance completes (isFinal=True) and buffer has >= MIN_WORDS, OR
+        b) Buffer hits CHUNK_WORDS (word-count fallback), OR
+        c) Buffer hits MAX_WORDS (hard cap).
+    Never blocks — transcript continues flowing while fact-checking runs.
+
+Layer 3 — _fact_check_and_send() [background asyncio.Task per window]
+    classify_claim() → is there a verifiable claim?
+    run_pipeline_from_claim() → DDG + Snopes/PolitiFact workers in parallel.
+    Sends {"type":"result",...} to Flutter when done.
+    Multiple instances run concurrently across overlapping windows.
 """
 
 from __future__ import annotations
@@ -30,11 +39,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from google import genai
-from google.genai import types
 
 from agents.claim_classifier import classify_claim
 from agents.supervisor import run_pipeline_from_claim
@@ -43,73 +49,53 @@ logger = logging.getLogger("dfacto.live_audit")
 
 router = APIRouter()
 
-# Native audio model gives best real-time transcription quality.
-# Override via GEMINI_LIVE_MODEL env var if needed.
-_MODEL = os.getenv(
-    "GEMINI_LIVE_MODEL",
-    "gemini-2.5-flash-native-audio-preview-12-2025",
-)
-
-_client: genai.Client | None = None
-
-
-def _get_client() -> genai.Client:
-    global _client
-    if _client is None:
-        _client = genai.Client(
-            api_key=os.environ["GEMINI_API_KEY"],
-            # v1alpha required for native audio preview models
-            http_options=types.HttpOptions(api_version="v1alpha"),
-        )
-    return _client
-
 
 # ── Rolling transcript buffer ──────────────────────────────────────────────────
 
 class TranscriptBuffer:
     """
-    Accumulates streaming transcript tokens word by word.
-
-    Triggers a claim-check every CHUNK_WORDS new words so the context window
-    grows organically. If no claim is found, keeps all words and tries again
-    at the next increment. Forces a check at MAX_WORDS. After a successful
-    claim extraction, retains TAIL_WORDS for natural continuity into the next window.
+    Accumulates final utterance texts word by word.
+    Designed for fire-and-forget concurrent fact-checking.
     """
 
-    CHUNK_WORDS: int = 25
-    MAX_WORDS: int = 50
-    TAIL_WORDS: int = 5
+    CHUNK_WORDS: int = 30        # Word-count trigger for fact-check
+    MAX_WORDS: int = 60          # Hard cap — always fire
+    TAIL_WORDS: int = 10         # Words kept after consume() for cross-window continuity
+    MIN_WORDS_TO_CHECK: int = 8  # Minimum before firing on utterance boundary
 
     def __init__(self) -> None:
         self._words: list[str] = []
         self._words_since_check: int = 0
 
-    def add(self, token: str) -> None:
-        new = token.split()
+    def add(self, text: str) -> None:
+        new = text.strip().split()
         self._words.extend(new)
         self._words_since_check += len(new)
 
     @property
-    def should_check(self) -> bool:
-        return (
-            self._words_since_check >= self.CHUNK_WORDS
-            or len(self._words) >= self.MAX_WORDS
-        )
+    def word_count(self) -> int:
+        return len(self._words)
 
     @property
     def has_content(self) -> bool:
         return bool(self._words)
 
-    def text(self) -> str:
+    @property
+    def should_check_on_count(self) -> bool:
+        return (
+            self._words_since_check >= self.CHUNK_WORDS
+            or len(self._words) >= self.MAX_WORDS
+        )
+
+    def ready_for_utterance_check(self) -> bool:
+        return self._words_since_check >= self.MIN_WORDS_TO_CHECK
+
+    def snapshot(self) -> str:
         return " ".join(self._words)
 
     def consume(self) -> None:
-        """Claim confirmed — keep tail for next window continuity."""
-        self._words = self._words[-self.TAIL_WORDS :]
-        self._words_since_check = 0
-
-    def reset_check_counter(self) -> None:
-        """No claim yet — keep all words, reset chunk counter."""
+        """Keep tail for continuity; reset counter."""
+        self._words = self._words[-self.TAIL_WORDS:]
         self._words_since_check = 0
 
     def clear(self) -> None:
@@ -117,51 +103,55 @@ class TranscriptBuffer:
         self._words_since_check = 0
 
 
-# ── Claim-check helper ─────────────────────────────────────────────────────────
+# ── Layer 3: background fact-check task ───────────────────────────────────────
 
-async def _check_buffer(buffer: TranscriptBuffer, ws: WebSocket) -> bool:
+async def _fact_check_and_send(text: str, ws: WebSocket) -> None:
     """
-    Classify buffer text; if it contains a verifiable claim, run the supervisor
-    pipeline and push the FactCheckResult to Flutter.
-    Returns True if a claim was processed and the buffer was consumed.
+    Background coroutine: classify text, run pipeline if claim found,
+    push result to Flutter. Runs concurrently — never blocks transcript display.
     """
-    text = buffer.text().strip()
+    text = text.strip()
     if not text:
-        buffer.reset_check_counter()
-        return False
+        return
 
-    logger.info("Buffer check: %d words — %r…", len(buffer._words), text[:80])
+    logger.info("Fact-check window (%d words): %r…", len(text.split()), text[:100])
 
-    classification = await asyncio.to_thread(classify_claim, text)
+    try:
+        classification = await asyncio.to_thread(classify_claim, text)
+    except Exception as exc:
+        logger.exception("classify_claim error: %s", exc)
+        return
+
     is_claim = classification.get("is_claim", False)
     needs_context = classification.get("needs_context", False)
 
-    if is_claim and not needs_context:
-        claim = classification.get("extracted_claim", "").strip() or text
-        logger.info("Claim confirmed — running pipeline: %r", claim[:80])
+    if not (is_claim and not needs_context):
+        logger.info(
+            "No actionable claim (is_claim=%s needs_context=%s) — window skipped",
+            is_claim, needs_context,
+        )
+        return
 
+    claim = classification.get("extracted_claim", "").strip() or text
+    logger.info("Claim extracted — running pipeline: %r", claim[:100])
+
+    try:
         result = await asyncio.to_thread(run_pipeline_from_claim, claim)
-        if result:
-            result["type"] = "result"
-            try:
-                await ws.send_text(json.dumps(result))
-                logger.info(
-                    "Result sent: verdict=%s confidence=%.2f",
-                    result.get("claimVeracity"),
-                    result.get("confidenceScore", 0.0),
-                )
-            except Exception:
-                pass
+    except Exception as exc:
+        logger.exception("run_pipeline_from_claim error: %s", exc)
+        return
 
-        buffer.consume()
-        return True
-
-    logger.info(
-        "No claim yet (is_claim=%s needs_context=%s) — accumulating",
-        is_claim, needs_context,
-    )
-    buffer.reset_check_counter()
-    return False
+    if result:
+        result["type"] = "result"
+        try:
+            await ws.send_text(json.dumps(result))
+            logger.info(
+                "Result sent: verdict=%s confidence=%.2f",
+                result.get("claimVeracity"),
+                result.get("confidenceScore", 0.0),
+            )
+        except Exception:
+            pass
 
 
 # ── WebSocket handler ──────────────────────────────────────────────────────────
@@ -169,165 +159,87 @@ async def _check_buffer(buffer: TranscriptBuffer, ws: WebSocket) -> bool:
 @router.websocket("/ws/live-audit")
 async def live_audit_ws(websocket: WebSocket):
     await websocket.accept()
-    logger.info("Live Audit WS connected — model=%s", _MODEL)
+    logger.info("Live Audit WS connected")
 
     buffer = TranscriptBuffer()
-    stop_event = asyncio.Event()
+    pending_tasks: set[asyncio.Task] = set()
 
-    live_config = {
-        # Text output only — we want transcription, not audio responses
-        "response_modalities": ["TEXT"],
-        # Surface the user's spoken audio as input_transcription tokens
-        "input_audio_transcription": {},
-        # Prevent the model from responding conversationally
-        "system_instruction": (
-            "You are a real-time transcription engine. "
-            "Listen to the audio and output only a verbatim transcription of the "
-            "spoken words. Do not respond, comment, or add anything else."
-        ),
-        # Low end-of-speech sensitivity avoids premature cuts mid-sentence
-        "realtime_input_config": {
-            "automatic_activity_detection": {
-                "disabled": False,
-                "end_of_speech_sensitivity": types.EndSensitivity.END_SENSITIVITY_LOW,
-                "silence_duration_ms": 500,
-            }
-        },
-    }
+    def _fire_check(snapshot: str) -> None:
+        if not snapshot.strip():
+            return
+        task = asyncio.create_task(_fact_check_and_send(snapshot, websocket))
+        pending_tasks.add(task)
+        task.add_done_callback(pending_tasks.discard)
 
     try:
-        client = _get_client()
-
-        async with client.aio.live.connect(model=_MODEL, config=live_config) as session:
-            logger.info("Gemini Live session established")
-
-            # ── Task 1: Flutter PCM → Gemini ──────────────────────────────────
-
-            async def pump_audio() -> None:
-                """Forward raw PCM chunks from Flutter to the Gemini Live session."""
-                try:
-                    while not stop_event.is_set():
-                        # Use the raw ASGI receive dict so we can handle both
-                        # binary (audio) and text (control) messages in one loop.
-                        msg = await websocket.receive()
-
-                        if msg["type"] == "websocket.disconnect":
-                            stop_event.set()
-                            break
-
-                        if msg["type"] != "websocket.receive":
-                            continue
-
-                        if msg.get("bytes"):
-                            await session.send_realtime_input(
-                                audio=types.Blob(
-                                    data=msg["bytes"],
-                                    mime_type="audio/pcm;rate=16000",
-                                )
-                            )
-                        elif msg.get("text"):
-                            try:
-                                ctrl = json.loads(msg["text"])
-                                if ctrl.get("type") == "stop":
-                                    logger.info("Stop signal from Flutter")
-                                    stop_event.set()
-                                    break
-                            except (json.JSONDecodeError, AttributeError):
-                                pass
-
-                except WebSocketDisconnect:
-                    stop_event.set()
-                except Exception as exc:
-                    logger.exception("pump_audio error: %s", exc)
-                    stop_event.set()
-
-            # ── Task 2: Gemini tokens → Flutter + rolling buffer ───────────────
-
-            async def pump_transcript() -> None:
-                """
-                Stream transcript tokens from Gemini → Flutter (live word display),
-                accumulate into rolling buffer, trigger claim detection at thresholds.
-                """
-                try:
-                    async for msg in session.receive():
-                        if stop_event.is_set():
-                            break
-
-                        # Extract input transcription token
-                        token: str | None = None
-                        try:
-                            sc = msg.server_content
-                            if sc and sc.input_transcription and sc.input_transcription.text:
-                                token = sc.input_transcription.text
-                        except AttributeError:
-                            pass
-
-                        if not token:
-                            continue
-
-                        buffer.add(token)
-
-                        # Push token to Flutter for word-by-word live display
-                        try:
-                            await websocket.send_text(
-                                json.dumps({
-                                    "type": "transcript",
-                                    "text": token,
-                                    "isPartial": True,
-                                })
-                            )
-                        except Exception:
-                            break
-
-                        # Check buffer at every 25-word / 50-word-max threshold
-                        if buffer.should_check:
-                            await _check_buffer(buffer, websocket)
-
-                except asyncio.CancelledError:
-                    pass
-                except Exception as exc:
-                    if not stop_event.is_set():
-                        logger.exception("pump_transcript error: %s", exc)
-
-            # ── Lifecycle: audio pump controls session duration ────────────────
-
-            t_audio = asyncio.create_task(pump_audio())
-            t_transcript = asyncio.create_task(pump_transcript())
-
-            # Wait for Stop (or disconnect) from Flutter
-            await t_audio
-
-            # Give Gemini 2 s to deliver any remaining transcript tokens
+        async for raw in websocket.iter_text():
             try:
-                await asyncio.wait_for(t_transcript, timeout=2.0)
-            except asyncio.TimeoutError:
-                t_transcript.cancel()
-                try:
-                    await t_transcript
-                except asyncio.CancelledError:
-                    pass
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
 
-            # ── Flush remaining buffer ─────────────────────────────────────────
+            msg_type = msg.get("type", "")
 
-            if buffer.has_content:
-                logger.info("Flushing %d buffered words after stop", len(buffer._words))
-                await _check_buffer(buffer, websocket)
+            if msg_type == "stop":
+                logger.info("Stop signal received")
+                break
 
-            # Signal Flutter that all processing is complete
-            try:
-                await websocket.send_text(json.dumps({"type": "done"}))
-            except Exception:
-                pass
+            if msg_type != "transcript_text":
+                continue
+
+            text = msg.get("text", "").strip()
+            is_final = bool(msg.get("isFinal", False))
+
+            if not text:
+                continue
+
+            logger.info("Transcript text (isFinal=%s): %r", is_final, text[:100])
+            buffer.add(text)
+
+            # ── Fire background fact-check (never block) ───────────────────────
+            if buffer.should_check_on_count:
+                logger.info(
+                    "Word-count trigger (%d words) — firing fact-check",
+                    buffer.word_count,
+                )
+                snapshot = buffer.snapshot()
+                buffer.consume()
+                _fire_check(snapshot)
+
+            elif is_final and buffer.ready_for_utterance_check():
+                logger.info(
+                    "Utterance boundary (%d words) — firing fact-check",
+                    buffer.word_count,
+                )
+                snapshot = buffer.snapshot()
+                buffer.consume()
+                _fire_check(snapshot)
 
     except WebSocketDisconnect:
-        logger.info("Live Audit WS disconnected before session started")
+        logger.info("Live Audit WS disconnected")
     except Exception as exc:
-        logger.exception("Live Audit WS fatal error: %s", exc)
+        logger.exception("Live Audit WS error: %s", exc)
         try:
-            await websocket.send_text(
-                json.dumps({"type": "error", "message": str(exc)})
-            )
+            await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
         except Exception:
             pass
     finally:
+        # Final flush of any remaining buffer
+        if buffer.has_content:
+            logger.info("Final flush: %d words", buffer.word_count)
+            _fire_check(buffer.snapshot())
+
+        # Wait for all in-flight fact-check tasks
+        if pending_tasks:
+            logger.info("Awaiting %d in-flight task(s)…", len(pending_tasks))
+            await asyncio.gather(*list(pending_tasks), return_exceptions=True)
+
+        try:
+            await websocket.send_text(json.dumps({"type": "done"}))
+        except Exception:
+            pass
+
+        for task in list(pending_tasks):
+            task.cancel()
+
         logger.info("Live Audit WS session ended")

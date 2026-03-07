@@ -16,9 +16,14 @@ from routers.debug import router as debug_router
 load_dotenv()
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
+# Suppress noisy third-party debug logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("websockets").setLevel(logging.WARNING)
+logging.getLogger("google").setLevel(logging.WARNING)
 logger = logging.getLogger("dfacto")
 
 

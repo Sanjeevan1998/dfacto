@@ -4,7 +4,7 @@ import '../../core/theme/app_theme.dart';
 import '../../navigation/app_shell.dart';
 import 'models/fact_check_result.dart';
 import 'models/transcript_segment.dart';
-import 'services/audio_service.dart';
+import 'services/speech_service.dart';
 import 'services/websocket_service.dart';
 import 'widgets/listen_button.dart';
 import 'widgets/waveform_visualizer.dart';
@@ -20,75 +20,66 @@ class LiveAuditScreen extends StatefulWidget {
 
 class _LiveAuditScreenState extends State<LiveAuditScreen> {
   bool _isListening = false;
-  bool _isStopping = false; // true while awaiting backend "done" after Stop
+  bool _isStopping = false;
 
   final List<TranscriptSegment> _segments = [];
   final List<FactCheckResult> _results = [];
 
-  // Live partial text: accumulates Gemini transcript tokens word-by-word.
-  // Cleared and committed to _segments when a fact-check result arrives,
-  // or when the session ends.
+  // Live partial text: updated word-by-word as the OS STT recognises speech.
+  // On a final result it is committed to _segments and cleared.
   String _partialText = '';
 
-  final _audio = AudioService.instance;
+  final _speech = SpeechService.instance;
   final _ws = WebSocketService.instance;
 
-  StreamSubscription<dynamic>? _audioSub;
-  StreamSubscription<dynamic>? _transcriptSub;
   StreamSubscription<dynamic>? _resultSub;
   StreamSubscription<dynamic>? _doneSub;
 
   // ── Session control ────────────────────────────────────────────────────────
 
   Future<void> _startListening() async {
-    // 1. Start raw PCM recording
-    final audioStream = await _audio.startRecording();
-    if (audioStream == null) {
-      // Permission denied or hardware error
-      return;
-    }
-
-    // 2. Connect WebSocket to backend
+    // Connect WebSocket first — fact-check results come back on this channel.
     _ws.connect();
 
-    // 3. Subscribe to transcript tokens → append word-by-word to partial text
-    _transcriptSub = _ws.transcriptStream?.listen((event) {
-      if (!mounted) return;
-      setState(() => _partialText += event.text);
-    });
-
-    // 4. Subscribe to fact-check results
-    //    When a result arrives, commit the accumulated partial text as a
-    //    completed segment and clear the partial for the next window.
     _resultSub = _ws.resultStream?.listen((result) {
       if (!mounted) return;
       setState(() {
-        // Snapshot the partial text that produced this claim
-        final segText = _partialText.trim();
-        _partialText = '';
-
-        if (segText.isNotEmpty) {
-          _segments.add(TranscriptSegment(
-            id: DateTime.now().toIso8601String(),
-            text: segText,
-            claim: result.claimText,
-            result: result,
-          ));
+        // Attach result to the most recent un-checked segment that has a claim.
+        // If none, just append the result to the feed.
+        final idx = _segments.lastIndexWhere((s) => s.hasClaim && !s.isChecked);
+        if (idx != -1) {
+          _segments[idx].result = result;
         }
         _results.insert(0, result);
       });
     });
 
-    // 5. Subscribe to "done" — backend finished flushing after Stop
     _doneSub = _ws.doneStream?.listen((_) {
       if (!mounted) return;
       _finalizeSession();
     });
 
-    // 6. Stream PCM chunks to backend via WebSocket
-    _audioSub = audioStream.listen((chunk) {
-      _ws.sendAudioChunk(chunk);
-    });
+    // Start on-device STT — word-by-word partial + final utterance callbacks.
+    await _speech.start(
+      onPartial: (partial) {
+        if (!mounted) return;
+        setState(() => _partialText = partial);
+      },
+      onFinal: (finalWords) {
+        if (!mounted) return;
+        setState(() {
+          // Commit the utterance as a completed segment.
+          _segments.add(TranscriptSegment(
+            id: DateTime.now().toIso8601String(),
+            text: finalWords,
+            claim: '',
+          ));
+          _partialText = '';
+        });
+        // Send the final utterance to the backend for claim detection + fact-check.
+        _ws.sendTranscriptText(finalWords, isFinal: true);
+      },
+    );
 
     setState(() {
       _isListening = true;
@@ -102,17 +93,27 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
       _isStopping = true;
     });
 
-    // Stop recording first so no more audio chunks are produced
-    await _audio.stopRecording();
-    _audioSub?.cancel();
-    _audioSub = null;
+    await _speech.stop();
 
-    // Send stop signal to backend — it will flush the buffer and send "done"
+    // Flush any remaining partial text as a final utterance.
+    final remaining = _partialText.trim();
+    if (remaining.isNotEmpty) {
+      setState(() {
+        _segments.add(TranscriptSegment(
+          id: DateTime.now().toIso8601String(),
+          text: remaining,
+          claim: '',
+        ));
+        _partialText = '';
+      });
+      _ws.sendTranscriptText(remaining, isFinal: true);
+    }
+
+    // Tell backend to flush its buffer and send "done".
     _ws.sendStop();
 
-    // _doneSub will call _finalizeSession() when backend responds with "done".
-    // Safety timeout: if backend doesn't respond in 10s, finalize anyway.
-    Future.delayed(const Duration(seconds: 10), () {
+    // Safety timeout: finalize if backend doesn't respond in 30s.
+    Future.delayed(const Duration(seconds: 30), () {
       if (mounted && _isStopping) _finalizeSession();
     });
   }
@@ -120,28 +121,12 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
   void _finalizeSession() {
     if (!mounted) return;
 
-    // Cancel all subscriptions
-    _transcriptSub?.cancel();
     _resultSub?.cancel();
     _doneSub?.cancel();
-    _transcriptSub = null;
     _resultSub = null;
     _doneSub = null;
 
-    // Commit any remaining partial text as a segment (no result yet)
-    final remaining = _partialText.trim();
-    setState(() {
-      if (remaining.isNotEmpty) {
-        _segments.add(TranscriptSegment(
-          id: DateTime.now().toIso8601String(),
-          text: remaining,
-          claim: '',
-        ));
-      }
-      _partialText = '';
-      _isStopping = false;
-    });
-
+    setState(() => _isStopping = false);
     _ws.disconnect();
   }
 
@@ -157,9 +142,7 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
   @override
   void dispose() {
-    _audio.stopRecording();
-    _audioSub?.cancel();
-    _transcriptSub?.cancel();
+    _speech.stop();
     _resultSub?.cancel();
     _doneSub?.cancel();
     _ws.disconnect();
@@ -170,7 +153,6 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Show completed segments + a live partial segment at the bottom
     final displaySegments = [
       ..._segments,
       if (_partialText.isNotEmpty)

@@ -1,20 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/fact_check_result.dart';
-
-/// A streaming transcript token from Gemini Live.
-/// [text] is the raw token (may be a word, partial phrase, or punctuation).
-/// [isPartial] is always true during a live session; false would indicate final.
-class TranscriptEvent {
-  const TranscriptEvent({
-    required this.text,
-    required this.isPartial,
-  });
-  final String text;
-  final bool isPartial;
-}
 
 class WebSocketService {
   WebSocketService._();
@@ -22,14 +9,12 @@ class WebSocketService {
 
   WebSocketChannel? _channel;
   StreamController<FactCheckResult>? _resultController;
-  StreamController<TranscriptEvent>? _transcriptController;
   StreamController<void>? _doneController;
   bool _isConnected = false;
 
   bool get isConnected => _isConnected;
 
   Stream<FactCheckResult>? get resultStream => _resultController?.stream;
-  Stream<TranscriptEvent>? get transcriptStream => _transcriptController?.stream;
 
   /// Emits once when the backend sends {"type":"done"} after Stop + flush.
   Stream<void>? get doneStream => _doneController?.stream;
@@ -38,7 +23,6 @@ class WebSocketService {
   void connect({String host = '192.168.1.158', int port = 8000}) {
     final uri = Uri.parse('ws://$host:$port/ws/live-audit');
     _resultController = StreamController<FactCheckResult>.broadcast();
-    _transcriptController = StreamController<TranscriptEvent>.broadcast();
     _doneController = StreamController<void>.broadcast();
     _channel = WebSocketChannel.connect(uri);
     _isConnected = true;
@@ -47,15 +31,9 @@ class WebSocketService {
       (message) {
         try {
           final json = jsonDecode(message as String) as Map<String, dynamic>;
-          final type = json['type'] as String? ?? 'result';
+          final type = json['type'] as String? ?? '';
 
           switch (type) {
-            case 'transcript':
-              _transcriptController?.add(TranscriptEvent(
-                text: json['text'] as String? ?? '',
-                isPartial: json['isPartial'] as bool? ?? true,
-              ));
-
             case 'result':
               final result = FactCheckResult.fromJson(json);
               _resultController?.add(result);
@@ -66,7 +44,6 @@ class WebSocketService {
             case 'error':
               final msg = json['message'] as String? ?? 'Unknown error';
               _resultController?.addError(Exception(msg));
-              _transcriptController?.addError(Exception(msg));
           }
         } catch (e) {
           // ignore: avoid_print
@@ -76,25 +53,28 @@ class WebSocketService {
       onError: (e) {
         _isConnected = false;
         _resultController?.addError(e);
-        _transcriptController?.addError(e);
       },
       onDone: () {
         _isConnected = false;
         _resultController?.close();
-        _transcriptController?.close();
         _doneController?.close();
       },
     );
   }
 
-  /// Send a raw PCM audio chunk to the backend.
-  void sendAudioChunk(Uint8List chunk) {
-    if (_isConnected && _channel != null) {
-      _channel!.sink.add(chunk);
+  /// Send a transcript text chunk to the backend for claim detection.
+  /// [isFinal] = true when the utterance is complete (natural pause detected).
+  void sendTranscriptText(String text, {bool isFinal = false}) {
+    if (_isConnected && _channel != null && text.trim().isNotEmpty) {
+      _channel!.sink.add(jsonEncode({
+        'type': 'transcript_text',
+        'text': text,
+        'isFinal': isFinal,
+      }));
     }
   }
 
-  /// Send the stop control message — backend will flush buffer and send "done".
+  /// Send the stop control message.
   void sendStop() {
     if (_isConnected && _channel != null) {
       _channel!.sink.add(jsonEncode({'type': 'stop'}));
@@ -106,11 +86,9 @@ class WebSocketService {
     _isConnected = false;
     await _channel?.sink.close();
     await _resultController?.close();
-    await _transcriptController?.close();
     await _doneController?.close();
     _channel = null;
     _resultController = null;
-    _transcriptController = null;
     _doneController = null;
   }
 }
