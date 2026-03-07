@@ -1,17 +1,15 @@
 package com.dfacto.dfacto_app
 
-import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import com.google.mlkit.genai.speech.recognition.AudioSource
-import com.google.mlkit.genai.speech.recognition.DownloadStatus
-import com.google.mlkit.genai.speech.recognition.FeatureStatus
-import com.google.mlkit.genai.speech.recognition.SpeechRecognition
-import com.google.mlkit.genai.speech.recognition.SpeechRecognitionResult
-import com.google.mlkit.genai.speech.recognition.SpeechRecognizer
-import com.google.mlkit.genai.speech.recognition.SpeechRecognizerOptions
-import com.google.mlkit.genai.speech.recognition.speechRecognizerOptions
-import com.google.mlkit.genai.speech.recognition.speechRecognizerRequest
+import com.google.mlkit.genai.common.DownloadStatus
+import com.google.mlkit.genai.common.FeatureStatus
+import com.google.mlkit.genai.common.audio.AudioSource
+import com.google.mlkit.genai.speechrecognition.SpeechRecognition
+import com.google.mlkit.genai.speechrecognition.SpeechRecognizerOptions
+import com.google.mlkit.genai.speechrecognition.SpeechRecognizerResponse
+import com.google.mlkit.genai.speechrecognition.speechRecognizerOptions
+import com.google.mlkit.genai.speechrecognition.speechRecognizerRequest
 import io.flutter.plugin.common.EventChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,15 +19,17 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 /**
- * Flutter EventChannel StreamHandler that wraps ML Kit GenAI Speech Recognition.
+ * Flutter EventChannel StreamHandler wrapping ML Kit GenAI Speech Recognition.
  *
- * Channel name : "com.dfacto/speech_recognition"
- * Flutter side receives: String (transcript text, partial or final)
- * Flutter side errors  : "UNAVAILABLE" | "DOWNLOAD_FAILED" | "RECOGNITION_ERROR"
+ * Channel : "com.dfacto/speech_recognition"
+ * Emits   : String (transcript text chunks — partial or final)
+ * Errors  : UNAVAILABLE | DOWNLOAD_FAILED | RECOGNITION_ERROR
  */
-class SpeechRecognitionPlugin(private val context: Context) : EventChannel.StreamHandler {
+class SpeechRecognitionPlugin(
+    private val context: android.content.Context
+) : EventChannel.StreamHandler {
 
-    private var recognizer: SpeechRecognizer? = null
+    private var recognizer: com.google.mlkit.genai.speechrecognition.SpeechRecognizer? = null
     private var recognitionJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -48,12 +48,10 @@ class SpeechRecognitionPlugin(private val context: Context) : EventChannel.Strea
                 val status: Int = recognizer!!.checkStatus()
                 when (status) {
                     FeatureStatus.AVAILABLE -> {
-                        // Model is on-device and ready — start immediately.
                         startRecognition(events)
                     }
                     FeatureStatus.DOWNLOADABLE -> {
-                        // Trigger model download, then start when complete.
-                        recognizer!!.download.collect { downloadStatus ->
+                        recognizer!!.download().collect { downloadStatus ->
                             when (downloadStatus) {
                                 is DownloadStatus.DownloadCompleted -> {
                                     startRecognition(events)
@@ -67,20 +65,16 @@ class SpeechRecognitionPlugin(private val context: Context) : EventChannel.Strea
                                         )
                                     }
                                 }
-                                is DownloadStatus.DownloadProgress -> {
-                                    // Could forward progress if needed — ignored for now.
-                                }
+                                is DownloadStatus.DownloadProgress -> { /* ignored */ }
                                 else -> {}
                             }
                         }
                     }
                     else -> {
-                        // FeatureStatus.UNAVAILABLE or unknown
                         mainHandler.post {
                             events.error(
                                 "UNAVAILABLE",
-                                "GenAI Speech Recognition is not available on this device " +
-                                    "(requires Android AICore / Gemini Nano, API 31+)",
+                                "GenAI STT requires Android AICore / Gemini Nano (API 31+)",
                                 null
                             )
                         }
@@ -117,8 +111,10 @@ class SpeechRecognitionPlugin(private val context: Context) : EventChannel.Strea
 
                 recognizer!!.startRecognition(request).collect { response ->
                     val text: String? = when (response) {
-                        is SpeechRecognitionResult.Partial -> response.text
-                        is SpeechRecognitionResult.Final   -> response.text
+                        is SpeechRecognizerResponse.PartialTextResponse -> response.text
+                        is SpeechRecognizerResponse.FinalTextResponse   -> response.text
+                        is SpeechRecognizerResponse.CompletedResponse   -> null
+                        is SpeechRecognizerResponse.ErrorResponse       -> null
                         else -> null
                     }
                     if (!text.isNullOrBlank()) {
