@@ -15,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -24,10 +25,18 @@ import java.util.Locale
  * Channel : "com.dfacto/speech_recognition"
  *
  * Emits Map payloads:
- *   Transcript  → {"text": String, "isFinal": Boolean}
- *   Status      → {"status": String}   e.g. "downloading", "available", "unavailable"
+ *   Transcript → {"text": String, "isFinal": Boolean}
+ *   Status     → {"status": String}
+ *                "downloading" — Gemini Nano model downloading
+ *                "available"   — ready to capture
+ *                "basic_mode"  — fell back to MODE_BASIC (AICore not ready)
  *
  * Errors: UNAVAILABLE | DOWNLOAD_FAILED | RECOGNITION_ERROR
+ *
+ * Strategy:
+ *   1. Try MODE_ADVANCED (Gemini Nano on-device via AICore)
+ *   2. If UNAVAILABLE or exception → automatically fall back to MODE_BASIC
+ *      (uses Android platform STT — still continuous via the same EventChannel)
  */
 class SpeechRecognitionPlugin(
     private val context: android.content.Context
@@ -38,7 +47,7 @@ class SpeechRecognitionPlugin(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Emit helpers ──────────────────────────────────────────────────────────
 
     private fun emitStatus(events: EventChannel.EventSink, status: String) {
         mainHandler.post { events.success(mapOf("status" to status)) }
@@ -52,51 +61,8 @@ class SpeechRecognitionPlugin(
     // ── EventChannel.StreamHandler ────────────────────────────────────────────
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
-        val options: SpeechRecognizerOptions = speechRecognizerOptions {
-            locale = Locale.US
-            preferredMode = SpeechRecognizerOptions.Mode.MODE_ADVANCED
-        }
-        recognizer = SpeechRecognition.getClient(options)
-
         scope.launch {
-            try {
-                val status: Int = recognizer!!.checkStatus()
-                when (status) {
-                    FeatureStatus.AVAILABLE -> {
-                        emitStatus(events, "available")
-                        startRecognition(events)
-                    }
-                    FeatureStatus.DOWNLOADABLE -> {
-                        emitStatus(events, "downloading")
-                        recognizer!!.download().collect { downloadStatus ->
-                            when (downloadStatus) {
-                                is DownloadStatus.DownloadCompleted -> {
-                                    emitStatus(events, "available")
-                                    startRecognition(events)
-                                }
-                                is DownloadStatus.DownloadFailed -> {
-                                    mainHandler.post {
-                                        events.error("DOWNLOAD_FAILED", "ML Kit model download failed", null)
-                                    }
-                                }
-                                is DownloadStatus.DownloadProgress -> { /* no-op */ }
-                                else -> {}
-                            }
-                        }
-                    }
-                    else -> {
-                        mainHandler.post {
-                            events.error(
-                                "UNAVAILABLE",
-                                "GenAI STT requires Android AICore / Gemini Nano (API 31+)",
-                                null
-                            )
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                mainHandler.post { events.error("RECOGNITION_ERROR", e.message, null) }
-            }
+            tryStartWithMode(SpeechRecognizerOptions.Mode.MODE_ADVANCED, events)
         }
     }
 
@@ -110,6 +76,106 @@ class SpeechRecognitionPlugin(
         }
     }
 
+    // ── Mode selection with automatic fallback ────────────────────────────────
+
+    private suspend fun tryStartWithMode(
+        mode: Int,
+        events: EventChannel.EventSink
+    ) {
+        val opts: SpeechRecognizerOptions = speechRecognizerOptions {
+            locale = Locale.US
+            preferredMode = mode
+        }
+
+        val rec = try {
+            SpeechRecognition.getClient(opts)
+        } catch (e: Exception) {
+            fallbackToBasic(mode, events, e)
+            return
+        }
+        recognizer = rec
+
+        try {
+            val status: Int = rec.checkStatus()
+            when (status) {
+                FeatureStatus.AVAILABLE -> {
+                    val statusLabel = if (mode == SpeechRecognizerOptions.Mode.MODE_ADVANCED)
+                        "available" else "basic_mode"
+                    emitStatus(events, statusLabel)
+                    startRecognition(events)
+                }
+
+                FeatureStatus.DOWNLOADABLE -> {
+                    // Gemini Nano needs to be downloaded — show spinner in Flutter.
+                    emitStatus(events, "downloading")
+                    rec.download().collect { dl ->
+                        when (dl) {
+                            is DownloadStatus.DownloadCompleted -> {
+                                emitStatus(events, "available")
+                                startRecognition(events)
+                            }
+                            is DownloadStatus.DownloadFailed -> {
+                                // download failed — fall back to BASIC
+                                fallbackToBasic(mode, events, null)
+                            }
+                            is DownloadStatus.DownloadProgress -> { /* no-op */ }
+                            else -> {}
+                        }
+                    }
+                }
+
+                FeatureStatus.DOWNLOADING -> {
+                    // AICore is already downloading model — wait for it then retry.
+                    emitStatus(events, "downloading")
+                    var retries = 0
+                    while (retries < 20) {   // poll up to 20 × 3s = 60s
+                        delay(3_000)
+                        val retryStatus = try { rec.checkStatus() } catch (_: Exception) { -1 }
+                        if (retryStatus == FeatureStatus.AVAILABLE) {
+                            emitStatus(events, "available")
+                            startRecognition(events)
+                            return
+                        }
+                        if (retryStatus != FeatureStatus.DOWNLOADING) break
+                        retries++
+                    }
+                    // Timed out or status changed to something unexpected — fall back.
+                    fallbackToBasic(mode, events, null)
+                }
+
+                else -> {
+                    // FeatureStatus.UNAVAILABLE or unknown — fall back to BASIC.
+                    fallbackToBasic(mode, events, null)
+                }
+            }
+        } catch (e: Exception) {
+            fallbackToBasic(mode, events, e)
+        }
+    }
+
+    private fun fallbackToBasic(
+        priorMode: Int,
+        events: EventChannel.EventSink,
+        cause: Exception?
+    ) {
+        if (priorMode == SpeechRecognizerOptions.Mode.MODE_BASIC) {
+            // Already tried BASIC — truly unavailable.
+            mainHandler.post {
+                events.error(
+                    "UNAVAILABLE",
+                    "GenAI Speech Recognition unavailable on this device (API 31+, AICore required). ${cause?.message ?: ""}",
+                    null
+                )
+            }
+            return
+        }
+        // First call was ADVANCED → fall back to BASIC silently.
+        scope.launch {
+            emitStatus(events, "basic_mode")
+            tryStartWithMode(SpeechRecognizerOptions.Mode.MODE_BASIC, events)
+        }
+    }
+
     // ── Recognition loop ──────────────────────────────────────────────────────
 
     private fun startRecognition(events: EventChannel.EventSink) {
@@ -118,15 +184,14 @@ class SpeechRecognitionPlugin(
                 val request = speechRecognizerRequest {
                     audioSource = AudioSource.fromMic()
                 }
-
                 recognizer!!.startRecognition(request).collect { response ->
                     when (response) {
                         is SpeechRecognizerResponse.PartialTextResponse ->
                             emitTranscript(events, response.text, isFinal = false)
                         is SpeechRecognizerResponse.FinalTextResponse ->
                             emitTranscript(events, response.text, isFinal = true)
-                        is SpeechRecognizerResponse.CompletedResponse -> { /* session done */ }
-                        is SpeechRecognizerResponse.ErrorResponse -> { /* ignored */ }
+                        is SpeechRecognizerResponse.CompletedResponse -> { /* session ended */ }
+                        is SpeechRecognizerResponse.ErrorResponse     -> { /* ignored */ }
                         else -> {}
                     }
                 }
