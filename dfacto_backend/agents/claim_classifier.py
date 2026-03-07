@@ -34,17 +34,22 @@ def _get_client() -> genai.Client:
         _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     return _client
 
-_SYSTEM_PROMPT = """You are a claim classifier. Given a spoken phrase, respond ONLY with a JSON object:
+_SYSTEM_PROMPT = """You are a claim classifier for a real-time fact-checking system. Given a spoken phrase (and optionally the full prior session transcript for context), respond ONLY with a JSON object:
 {
   "is_claim": <true if it contains a verifiable factual claim, false if it's opinion/filler/question/greeting>,
-  "needs_context": <true if the phrase references something unclear without prior context, e.g. "that caused cancer", "he lied about it">,
-  "extracted_claim": "<the core claim in a standalone declarative sentence, or empty string if not a claim>"
+  "needs_context": <true if the phrase references something unclear EVEN WITH the prior context provided>,
+  "extracted_claim": "<the core claim as a fully self-contained standalone declarative sentence, or empty string if not a claim>"
 }
+
+Rules:
+- Use the prior session context to resolve referential phrases like "that caused cancer" or "he said it happened".
+- If the prior context resolves what 'that'/'it'/'he' refers to, set needs_context=false and write a fully resolved extracted_claim.
+- extracted_claim must be understandable without any surrounding context — it must name subjects explicitly.
 
 Examples:
 "The Earth is flat" → {"is_claim": true, "needs_context": false, "extracted_claim": "The Earth is flat"}
 "Vaccines cause autism" → {"is_claim": true, "needs_context": false, "extracted_claim": "Vaccines cause autism"}
-"That happened in 2020" → {"is_claim": false, "needs_context": true, "extracted_claim": ""}
+"That happened in 2020" (no prior context) → {"is_claim": false, "needs_context": true, "extracted_claim": ""}
 "Yeah that's interesting" → {"is_claim": false, "needs_context": false, "extracted_claim": ""}
 "So anyway" → {"is_claim": false, "needs_context": false, "extracted_claim": ""}
 "Neil Armstrong was the first to walk on the Moon in 1969" → {"is_claim": true, "needs_context": false, "extracted_claim": "Neil Armstrong was the first person to walk on the Moon in 1969"}
@@ -66,8 +71,13 @@ _CONTEXT_PATTERNS = re.compile(
 )
 
 
-def classify_claim(text: str) -> dict:
+def classify_claim(text: str, full_context: str = "") -> dict:
     """
+    Args:
+        text: The new spoken window to classify (words since last check).
+        full_context: The full session transcript so far (all words spoken).
+                      Passed to Gemini so referential phrases can be resolved.
+
     Returns:
         {
           "is_claim": bool,
@@ -86,12 +96,18 @@ def classify_claim(text: str) -> dict:
 
     try:
         client = _get_client()
+        context_section = (
+            f'\n\nPrior session context (use to resolve ambiguous references):\n"""{full_context}"""\n'
+            if full_context.strip()
+            else ""
+        )
+        prompt = f'{_SYSTEM_PROMPT}{context_section}\nNew phrase to classify: "{text}"'
         response = client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=f'{_SYSTEM_PROMPT}\n\nPhrase: "{text}"',
+            contents=prompt,
             config=genai_types.GenerateContentConfig(
                 temperature=0.1,
-                max_output_tokens=120,
+                max_output_tokens=180,
             ),
         )
         raw = response.text.strip()

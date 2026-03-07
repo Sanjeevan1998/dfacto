@@ -11,25 +11,26 @@ Backend → Flutter  : text  {"type":"result",...}   FactCheckResult when claim 
 Backend → Flutter  : text  {"type":"done"}          after stop + all tasks finish
 Backend → Flutter  : text  {"type":"error","message":"..."}  on fatal error
 
-Architecture (3 concurrent layers)
-------------
-Layer 1 — Device STT (Flutter, on-device)
-    speech_to_text package transcribes audio word-by-word on the device.
-    Partial results → live display in UI instantly (no backend round-trip).
-    Final results (utterance complete) → sent to backend via WebSocket.
+Architecture (3-layer pipeline)
+--------------------------------
+Layer 1 — Agent 1a (WS Ingestor)
+    Dedicated strictly to the WebSocket receive loop.
+    Pushes each final utterance text into an asyncio.Queue.
+    Zero dropped words — the queue decouples receipt from processing.
 
-Layer 2 — TranscriptBuffer (Backend, this file)
-    Receives final utterance texts from Flutter.
-    Accumulates in rolling buffer.
-    Fires Layer 3 as a background task when:
-        a) An utterance completes (isFinal=True) and buffer has >= MIN_WORDS, OR
-        b) Buffer hits CHUNK_WORDS (word-count fallback), OR
-        c) Buffer hits MAX_WORDS (hard cap).
-    Never blocks — transcript continues flowing while fact-checking runs.
+Layer 2 — Agent 1b (Context & Meaning Accumulator)
+    pump_transcript() coroutine reads from the queue.
+    Maintains a ContextWindow: ALL words spoken this session are kept.
+    Never discards spoken words — uses _check_from_idx pointer to know
+    which words are "new since last check".
+    Fires Layer 3 as a fire-and-forget asyncio.Task when:
+        a) Enough new words have arrived since last check (CHUNK_WORDS), OR
+        b) An utterance boundary arrives and MIN_NEW_WORDS threshold met.
+    Transcript continues flowing while fact-checking runs concurrently.
 
-Layer 3 — _fact_check_and_send() [background asyncio.Task per window]
-    classify_claim() → is there a verifiable claim?
-    run_pipeline_from_claim() → DDG + Snopes/PolitiFact workers in parallel.
+Layer 3 — Agent 1c → pipeline [background asyncio.Task per window]
+    classify_claim(new_window, full_context) → is there a verifiable claim?
+    run_pipeline_from_claim(claim) → workers in parallel.
     Sends {"type":"result",...} to Flutter when done.
     Multiple instances run concurrently across overlapping windows.
 """
@@ -50,74 +51,86 @@ logger = logging.getLogger("dfacto.live_audit")
 router = APIRouter()
 
 
-# ── Rolling transcript buffer ──────────────────────────────────────────────────
+# ── Agent 1b: Context Window (NEVER discards session words) ───────────────────
 
-class TranscriptBuffer:
+class ContextWindow:
     """
-    Accumulates final utterance texts word by word.
-    Designed for fire-and-forget concurrent fact-checking.
+    Accumulates ALL words spoken in the session.
+    Never removes words — uses _check_from_idx to track which words
+    are new since the last fact-check trigger.
     """
 
-    CHUNK_WORDS: int = 30        # Word-count trigger for fact-check
-    MAX_WORDS: int = 60          # Hard cap — always fire
-    TAIL_WORDS: int = 10         # Words kept after consume() for cross-window continuity
-    MIN_WORDS_TO_CHECK: int = 8  # Minimum before firing on utterance boundary
+    CHUNK_NEW_WORDS: int = 30   # Trigger fact-check after this many new words
+    MIN_NEW_WORDS: int = 8      # Minimum new words before firing on utterance boundary
 
     def __init__(self) -> None:
-        self._words: list[str] = []
-        self._words_since_check: int = 0
+        self._words: list[str] = []       # Full session transcript (never shrinks)
+        self._check_from_idx: int = 0     # Index of first word not yet checked
 
     def add(self, text: str) -> None:
-        new = text.strip().split()
-        self._words.extend(new)
-        self._words_since_check += len(new)
+        self._words.extend(text.strip().split())
 
     @property
-    def word_count(self) -> int:
+    def total_words(self) -> int:
         return len(self._words)
+
+    @property
+    def new_word_count(self) -> int:
+        return len(self._words) - self._check_from_idx
+
+    @property
+    def has_new_content(self) -> bool:
+        return self.new_word_count > 0
+
+    @property
+    def should_check_on_count(self) -> bool:
+        return self.new_word_count >= self.CHUNK_NEW_WORDS
+
+    def ready_for_utterance_check(self) -> bool:
+        return self.new_word_count >= self.MIN_NEW_WORDS
+
+    def new_window_snapshot(self) -> str:
+        """The words added since the last check (what's new)."""
+        return " ".join(self._words[self._check_from_idx:])
+
+    def full_context_snapshot(self) -> str:
+        """The entire session transcript so far."""
+        return " ".join(self._words)
+
+    def advance_check_pointer(self) -> None:
+        """Mark all current words as checked. Words are NEVER deleted."""
+        self._check_from_idx = len(self._words)
 
     @property
     def has_content(self) -> bool:
         return bool(self._words)
 
-    @property
-    def should_check_on_count(self) -> bool:
-        return (
-            self._words_since_check >= self.CHUNK_WORDS
-            or len(self._words) >= self.MAX_WORDS
-        )
-
-    def ready_for_utterance_check(self) -> bool:
-        return self._words_since_check >= self.MIN_WORDS_TO_CHECK
-
-    def snapshot(self) -> str:
-        return " ".join(self._words)
-
-    def consume(self) -> None:
-        """Keep tail for continuity; reset counter."""
-        self._words = self._words[-self.TAIL_WORDS:]
-        self._words_since_check = 0
-
-    def clear(self) -> None:
-        self._words.clear()
-        self._words_since_check = 0
-
 
 # ── Layer 3: background fact-check task ───────────────────────────────────────
 
-async def _fact_check_and_send(text: str, ws: WebSocket) -> None:
+async def _fact_check_and_send(
+    new_window: str,
+    full_context: str,
+    ws: WebSocket,
+) -> None:
     """
-    Background coroutine: classify text, run pipeline if claim found,
-    push result to Flutter. Runs concurrently — never blocks transcript display.
+    Background coroutine: classify the new window (with full context),
+    run pipeline if a claim is found, push result to Flutter.
+    Runs concurrently — never blocks the transcript ingestor.
     """
-    text = text.strip()
-    if not text:
+    new_window = new_window.strip()
+    if not new_window:
         return
 
-    logger.info("Fact-check window (%d words): %r…", len(text.split()), text[:100])
+    logger.info(
+        "Fact-check window (%d new words, %d total context): %r…",
+        len(new_window.split()),
+        len(full_context.split()),
+        new_window[:100],
+    )
 
     try:
-        classification = await asyncio.to_thread(classify_claim, text)
+        classification = await asyncio.to_thread(classify_claim, new_window, full_context)
     except Exception as exc:
         logger.exception("classify_claim error: %s", exc)
         return
@@ -128,11 +141,12 @@ async def _fact_check_and_send(text: str, ws: WebSocket) -> None:
     if not (is_claim and not needs_context):
         logger.info(
             "No actionable claim (is_claim=%s needs_context=%s) — window skipped",
-            is_claim, needs_context,
+            is_claim,
+            needs_context,
         )
         return
 
-    claim = classification.get("extracted_claim", "").strip() or text
+    claim = classification.get("extracted_claim", "").strip() or new_window
     logger.info("Claim extracted — running pipeline: %r", claim[:100])
 
     try:
@@ -154,23 +168,17 @@ async def _fact_check_and_send(text: str, ws: WebSocket) -> None:
             pass
 
 
-# ── WebSocket handler ──────────────────────────────────────────────────────────
+# ── Agent 1a: WS Ingestor → asyncio.Queue ─────────────────────────────────────
 
-@router.websocket("/ws/live-audit")
-async def live_audit_ws(websocket: WebSocket):
-    await websocket.accept()
-    logger.info("Live Audit WS connected")
-
-    buffer = TranscriptBuffer()
-    pending_tasks: set[asyncio.Task] = set()
-
-    def _fire_check(snapshot: str) -> None:
-        if not snapshot.strip():
-            return
-        task = asyncio.create_task(_fact_check_and_send(snapshot, websocket))
-        pending_tasks.add(task)
-        task.add_done_callback(pending_tasks.discard)
-
+async def _ingest_ws(
+    websocket: WebSocket,
+    queue: asyncio.Queue[tuple[str, bool] | None],
+) -> None:
+    """
+    Agent 1a — dedicated WS receive loop.
+    Pushes (text, is_final) tuples into the queue.
+    Sends None sentinel to signal stop.
+    """
     try:
         async for raw in websocket.iter_text():
             try:
@@ -194,29 +202,87 @@ async def live_audit_ws(websocket: WebSocket):
                 continue
 
             logger.info("Transcript text (isFinal=%s): %r", is_final, text[:100])
-            buffer.add(text)
-
-            # ── Fire background fact-check (never block) ───────────────────────
-            if buffer.should_check_on_count:
-                logger.info(
-                    "Word-count trigger (%d words) — firing fact-check",
-                    buffer.word_count,
-                )
-                snapshot = buffer.snapshot()
-                buffer.consume()
-                _fire_check(snapshot)
-
-            elif is_final and buffer.ready_for_utterance_check():
-                logger.info(
-                    "Utterance boundary (%d words) — firing fact-check",
-                    buffer.word_count,
-                )
-                snapshot = buffer.snapshot()
-                buffer.consume()
-                _fire_check(snapshot)
+            await queue.put((text, is_final))
 
     except WebSocketDisconnect:
-        logger.info("Live Audit WS disconnected")
+        logger.info("Live Audit WS disconnected during ingest")
+    except Exception as exc:
+        logger.exception("WS ingest error: %s", exc)
+    finally:
+        await queue.put(None)  # sentinel → pump_transcript exits
+
+
+# ── Agent 1b: Context Accumulator + fire-and-forget trigger ───────────────────
+
+async def _pump_transcript(
+    queue: asyncio.Queue[tuple[str, bool] | None],
+    context: ContextWindow,
+    websocket: WebSocket,
+    pending_tasks: set[asyncio.Task],
+) -> None:
+    """
+    Agent 1b — reads queue, builds the never-discarding ContextWindow,
+    fires fact-check tasks at the right moments.
+    """
+
+    def _fire_check() -> None:
+        new_window = context.new_window_snapshot()
+        full_ctx = context.full_context_snapshot()
+        if not new_window.strip():
+            return
+        context.advance_check_pointer()
+        task = asyncio.create_task(
+            _fact_check_and_send(new_window, full_ctx, websocket)
+        )
+        pending_tasks.add(task)
+        task.add_done_callback(pending_tasks.discard)
+
+    while True:
+        item = await queue.get()
+
+        if item is None:  # sentinel — WS ingestor finished
+            break
+
+        text, is_final = item
+        context.add(text)
+
+        if context.should_check_on_count:
+            logger.info(
+                "Word-count trigger (%d new words) — firing fact-check",
+                context.new_word_count,
+            )
+            _fire_check()
+
+        elif is_final and context.ready_for_utterance_check():
+            logger.info(
+                "Utterance boundary (%d new words) — firing fact-check",
+                context.new_word_count,
+            )
+            _fire_check()
+
+    # Final flush: any remaining new words after stop
+    if context.has_new_content:
+        logger.info("Final flush: %d new words", context.new_word_count)
+        _fire_check()
+
+
+# ── WebSocket handler ──────────────────────────────────────────────────────────
+
+@router.websocket("/ws/live-audit")
+async def live_audit_ws(websocket: WebSocket):
+    await websocket.accept()
+    logger.info("Live Audit WS connected")
+
+    queue: asyncio.Queue[tuple[str, bool] | None] = asyncio.Queue()
+    context = ContextWindow()
+    pending_tasks: set[asyncio.Task] = set()
+
+    try:
+        # Run Agent 1a and Agent 1b concurrently
+        await asyncio.gather(
+            _ingest_ws(websocket, queue),
+            _pump_transcript(queue, context, websocket, pending_tasks),
+        )
     except Exception as exc:
         logger.exception("Live Audit WS error: %s", exc)
         try:
@@ -224,11 +290,6 @@ async def live_audit_ws(websocket: WebSocket):
         except Exception:
             pass
     finally:
-        # Final flush of any remaining buffer
-        if buffer.has_content:
-            logger.info("Final flush: %d words", buffer.word_count)
-            _fire_check(buffer.snapshot())
-
         # Wait for all in-flight fact-check tasks
         if pending_tasks:
             logger.info("Awaiting %d in-flight task(s)…", len(pending_tasks))
@@ -242,4 +303,7 @@ async def live_audit_ws(websocket: WebSocket):
         for task in list(pending_tasks):
             task.cancel()
 
-        logger.info("Live Audit WS session ended")
+        logger.info(
+            "Live Audit WS session ended — total words captured: %d",
+            context.total_words,
+        )
