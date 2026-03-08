@@ -34,7 +34,7 @@ def classify_claim(text: str) -> bool:
     if not api_key or api_key == "your_gemini_api_key_here":
         return True # Fallback to running pipeline if missing key
         
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0.0)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", google_api_key=api_key, temperature=0.0)
     prompt = f"Does the following text contain a factual claim that can be verified and evaluated as true or false? Answer YES or NO.\nText: {text}"
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
@@ -51,7 +51,7 @@ def extract_node(state: GraphState):
     if not api_key or api_key == "your_gemini_api_key_here":
         return {"core_claim": transcript}
         
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0.1)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", google_api_key=api_key, temperature=0.1)
     
     prompt = """
     Extract the single most verifiable core claim from the transcript. 
@@ -114,7 +114,7 @@ def _evaluate_evidence(claim: str, source_name: str, search_result: str, weight:
             trust_weight=0.0
         )
         
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0.1)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", google_api_key=api_key, temperature=0.1)
     
     safe_search_result = search_result.strip()
     if not safe_search_result:
@@ -241,7 +241,7 @@ def synthesize_node(state: GraphState):
     if not api_key or api_key == "your_gemini_api_key_here" or not evidence:
         return {"summary": "Insufficient data (or invalid API Key) to synthesize an explanation."}
         
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0.1)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", google_api_key=api_key, temperature=0.1)
     
     prompt = f"""
     Fact Check Result: {verdict}

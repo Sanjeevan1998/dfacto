@@ -58,7 +58,7 @@ def extract_node(state: GraphState):
         print("WARNING: GEMINI_API_KEY is not set or invalid.")
         return {"headlines": []}
         
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=api_key, temperature=0.1)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", google_api_key=api_key, temperature=0.1)
     
     keywords = state["keywords"]
     
