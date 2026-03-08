@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DFacto - Home</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet"
+  >
+  <link
+    rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,500,0,0"
+  >
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      min-height: 100%;
+      font-family: "Inter", sans-serif;
+      background: #e8edf5;
+      color: #16181d;
+    }
+    
+    body {
+      min-height: 100vh;
+    }
+    
+    button,
+    input,
+    a {
+      font: inherit;
+    }
+    
+    a {
+      text-decoration: none;
+    }
+    
+    .app-shell {
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 28px 16px;
+    }
+    
+    .phone {
+      width: 390px;
+      max-width: 100%;
+      height: 844px;
+      background: linear-gradient(180deg, #fafbfc 0%, #f1f4f8 100%);
+      border-radius: 34px;
+      border: 1px solid #d8dee8;
+      box-shadow: 0 24px 80px rgba(20, 25, 36, 0.14);
+      position: relative;
+      overflow: hidden;
+    }
+    
+    .page {
+      position: absolute;
+      inset: 0;
+    }
+    
+    .screen-inner {
+      height: 100%;
+      overflow-y: auto;
+      padding: 28px 20px 120px;
+    }
+    
+    .screen-inner::-webkit-scrollbar {
+      width: 0;
+    }
+    
+    .home-layout {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 100%;
+    }
+    
+    .home-header h1 {
+      margin: 0;
+      font-size: 2rem;
+      line-height: 1.08;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: #17191f;
+    }
+    
+    .home-center {
+      margin: auto 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .tap-label {
+      color: #4f5764;
+      margin-bottom: 2rem;
+      font-size: 2rem;
+      line-height: 1.08;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
+    
+    .listen-button {
+      width: 138px;
+      height: 138px;
+      border: none;
+      border-radius: 50%;
+      background: #1f232b;
+      color: #ffffff;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      position: relative;
+      overflow: hidden;
+      cursor: pointer;
+      box-shadow: 0 18px 35px rgba(20, 23, 31, 0.18);
+      transition: transform 0.22s ease, box-shadow 0.22s ease;
+    }
+    
+    .listen-button:hover {
+      transform: scale(1.03);
+      box-shadow: 0 22px 42px rgba(20, 23, 31, 0.2);
+    }
+    
+    .listen-button:active {
+      transform: scale(0.98);
+    }
+    
+    .mic-icon {
+      font-size: 3rem;
+      line-height: 1;
+      transition: opacity 0.22s ease;
+    }
+    
+    .waveform {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      width: 58px;
+      height: 52px;
+      position: absolute;
+      opacity: 0;
+      transition: opacity 0.22s ease;
+    }
+    
+    .wave-bar {
+      width: 4px;
+      height: 10%;
+      background: #efefef;
+      border-radius: 100px;
+      animation: waves 250ms linear infinite alternate;
+    }
+    
+    .wave-bar:nth-child(2) {
+      animation-delay: 100ms;
+    }
+    
+    .wave-bar:nth-child(3) {
+      animation-delay: 200ms;
+    }
+    
+    .wave-bar:nth-child(4) {
+      animation-delay: 120ms;
+    }
+    
+    .wave-bar:nth-child(5) {
+      animation-delay: 70ms;
+    }
+    
+    .wave-bar:nth-child(6) {
+      animation-delay: 200ms;
+    }
+    
+    .wave-bar:nth-child(7) {
+      animation-delay: 20ms;
+    }
+    
+    .listen-button.loading .mic-icon {
+      opacity: 0;
+    }
+    
+    .listen-button.loading .waveform {
+      opacity: 1;
+    }
+    
+    @keyframes waves {
+      from {
+        height: 10%;
+      }
+      to {
+        height: 100%;
+      }
+    }
+    
+    @media (max-width: 420px) {
+      .app-shell {
+        padding: 0;
+      }
+    
+      .phone {
+        width: 100%;
+        max-width: none;
+        height: 100vh;
+        border-radius: 0;
+      }
+    }
+  </style>
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <div class="phone">
+      <main class="page page-home">
+        <div class="screen-inner home-layout">
+          <header class="home-header">
+            <h1>Hello Erin.<br>Welcome to DFacto.</h1>
+          </header>
+
+          <section class="home-center">
+            <p class="tap-label">Tap to Listen.</p>
+
+            <button type="button" class="listen-button" id="listenButton" aria-label="Start listening">
+              <span class="mic-icon material-symbols-outlined">mic</span>
+
+              <div class="waveform" aria-hidden="true">
+                <div class="wave-bar"></div>
+                <div class="wave-bar"></div>
+                <div class="wave-bar"></div>
+                <div class="wave-bar"></div>
+                <div class="wave-bar"></div>
+                <div class="wave-bar"></div>
+                <div class="wave-bar"></div>
+              </div>
+            </button>
+          </section>
+        </div>
+      </main>
+
+      <nav class="bottom-nav" id="bottomNav">
+        <a class="nav-item active" class="nav-item" href="home.html" aria-label="Home">
+          <div class="nav-icon-wrap">
+            <span class="material-symbols-outlined" style="color:#4f5764;">home</span>
+          </div>
+        </a>
+
+        <a class="nav-item" href="audio.html" aria-label="Audio">
+          <div class="nav-icon-wrap">
+            <span class="material-symbols-outlined" style="color:#4f5764;">mic</span>
+          </div>
+        </a>
+
+        <a class="nav-item" href="video.html" aria-label="Video">
+          <div class="nav-icon-wrap">
+            <span class="material-symbols-outlined" style="color:#4f5764;">videocam</span>
+          </div>
+        </a>
+
+        <a href="news.html" aria-label="News">
+          <div class="nav-icon-wrap">
+            <span class="material-symbols-outlined" style="color:#4f5764;">article</span>
+          </div>
+        </a>
+      </nav>
+    </div>
+  </div>
+  <script>
+    (() => {
+      const listenButton = document.getElementById("listenButton");
+      if (!listenButton) return;
+  
+      let isTransitioning = false;
+  
+      const goToAudio = () => {
+        if (isTransitioning) return;
+        isTransitioning = true;
+  
+        listenButton.classList.add("pressed");
+  
+        requestAnimationFrame(() => {
+          setTimeout(() => {
+            listenButton.classList.add("loading");
+          }, 90);
+  
+          setTimeout(() => {
+            document.body.classList.add("page-exit");
+          }, 420);
+  
+          setTimeout(() => {
+            window.location.href = "audio.html";
+          }, 900);
+        });
+      };
+  
+      listenButton.addEventListener("click", goToAudio);
+  
+      listenButton.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          goToAudio();
+        }
+      });
+    })();
+  </script>
+
+  <script>
+    const listenButton = document.getElementById("listenButton");
+
+    if (listenButton) {
+      listenButton.addEventListener("click", () => {
+        if (listenButton.classList.contains("loading")) return;
+
+        listenButton.classList.add("loading");
+
+        setTimeout(() => {
+          window.location.href = "audio.html";
+        }, 1800);
+      });
+    }
+  </script>
+</body>
+</html>
