@@ -37,15 +37,40 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
   StreamSubscription<dynamic>? _resultSub;
   StreamSubscription<dynamic>? _doneSub;
+  StreamSubscription<dynamic>? _checkingSub;
 
   // ── Session control ────────────────────────────────────────────────────────
 
   Future<void> _startListening() async {
     _ws.connect();
 
+    // Show pending card as soon as backend starts checking a claim
+    _checkingSub = _ws.checkingStream?.listen((claimText) {
+      if (!mounted) return;
+      setState(() {
+        // Only add if not already pending for this claim
+        final alreadyPending = _results.any(
+          (r) => r.isPending && r.claimText == claimText,
+        );
+        if (!alreadyPending) {
+          _results.insert(0, FactCheckResult.pending(claimText));
+        }
+      });
+    });
+
+    // Replace pending card with real result (matched by claimText)
     _resultSub = _ws.resultStream?.listen((result) {
       if (!mounted) return;
-      setState(() => _results.insert(0, result));
+      setState(() {
+        final pendingIdx = _results.indexWhere(
+          (r) => r.isPending && r.claimText == result.claimText,
+        );
+        if (pendingIdx >= 0) {
+          _results[pendingIdx] = result;
+        } else {
+          _results.insert(0, result);
+        }
+      });
     });
 
     _doneSub = _ws.doneStream?.listen((_) {
@@ -139,8 +164,10 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
     if (!mounted) return;
     _resultSub?.cancel();
     _doneSub?.cancel();
+    _checkingSub?.cancel();
     _resultSub = null;
     _doneSub = null;
+    _checkingSub = null;
     setState(() => _isStopping = false);
     _ws.disconnect();
   }
@@ -160,6 +187,7 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
     _stt.stop();
     _resultSub?.cancel();
     _doneSub?.cancel();
+    _checkingSub?.cancel();
     _ws.disconnect();
     super.dispose();
   }

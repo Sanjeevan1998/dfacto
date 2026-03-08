@@ -12,6 +12,7 @@ class WebSocketService {
   StreamController<FactCheckResult>? _resultController;
   StreamController<void>? _doneController;
   StreamController<Map<String, dynamic>>? _transcriptController;
+  StreamController<String>? _checkingController;
   bool _isConnected = false;
 
   bool get isConnected => _isConnected;
@@ -25,12 +26,16 @@ class WebSocketService {
   Stream<Map<String, dynamic>>? get transcriptStream =>
       _transcriptController?.stream;
 
+  /// Emits the claim text immediately when backend starts fact-checking it.
+  Stream<String>? get checkingStream => _checkingController?.stream;
+
   /// Connect to the FastAPI WebSocket endpoint.
   void connect({String host = '192.168.1.158', int port = 8000}) {
     final uri = Uri.parse('ws://$host:$port/ws/live-audit');
     _resultController = StreamController<FactCheckResult>.broadcast();
     _doneController = StreamController<void>.broadcast();
     _transcriptController = StreamController<Map<String, dynamic>>.broadcast();
+    _checkingController = StreamController<String>.broadcast();
     _channel = WebSocketChannel.connect(uri);
     _isConnected = true;
 
@@ -44,6 +49,24 @@ class WebSocketService {
             case 'result':
               final result = FactCheckResult.fromJson(json);
               _resultController?.add(result);
+
+            case 'checking':
+              final claimText = json['claimText'] as String? ?? '';
+              if (claimText.isNotEmpty) _checkingController?.add(claimText);
+
+            case 'checking_failed':
+              // Emit a failed result so the pending card can be removed
+              final claimText = json['claimText'] as String? ?? '';
+              if (claimText.isNotEmpty) {
+                _resultController?.add(FactCheckResult(
+                  id: 'failed__$claimText',
+                  claimText: claimText,
+                  claimVeracity: ClaimVeracity.unknown,
+                  confidenceScore: 0.0,
+                  summaryAndExplanation: 'Could not retrieve fact-check results.',
+                  isPending: false,
+                ));
+              }
 
             case 'transcript':
               _transcriptController?.add(json);
@@ -69,6 +92,7 @@ class WebSocketService {
         _resultController?.close();
         _doneController?.close();
         _transcriptController?.close();
+        _checkingController?.close();
       },
     );
   }
@@ -106,9 +130,11 @@ class WebSocketService {
     await _resultController?.close();
     await _doneController?.close();
     await _transcriptController?.close();
+    await _checkingController?.close();
     _channel = null;
     _resultController = null;
     _doneController = null;
     _transcriptController = null;
+    _checkingController = null;
   }
 }

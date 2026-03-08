@@ -15,6 +15,8 @@ class FactCheckResult {
     required this.confidenceScore,
     required this.summaryAndExplanation,
     this.keySource,
+    this.keySources = const [],
+    this.isPending = false,
   });
 
   final String id;
@@ -23,11 +25,33 @@ class FactCheckResult {
   final double confidenceScore; // 0.0 – 1.0
   final String summaryAndExplanation;
   final String? keySource;
+  final List<String> keySources;
+
+  /// True while the backend is still running the pipeline for this claim.
+  final bool isPending;
+
+  /// Creates a placeholder shown immediately when the backend starts checking.
+  factory FactCheckResult.pending(String claimText) {
+    return FactCheckResult(
+      id: 'pending__$claimText',
+      claimText: claimText,
+      claimVeracity: ClaimVeracity.unknown,
+      confidenceScore: 0.0,
+      summaryAndExplanation: '',
+      isPending: true,
+    );
+  }
 
   factory FactCheckResult.fromJson(Map<String, dynamic> json) {
+    // Collect all source URLs (key_sources array + keySource single)
+    final sources = <String>[];
+    final raw = json['key_sources'];
+    if (raw is List) sources.addAll(raw.whereType<String>());
+    final single = json['keySource'] as String? ?? json['key_source'] as String?;
+    if (single != null && !sources.contains(single)) sources.insert(0, single);
+
     return FactCheckResult(
       id: json['id'] as String? ?? DateTime.now().toIso8601String(),
-      // Support both camelCase (backend) and snake_case (legacy)
       claimText: json['claimText'] as String? ?? json['claim_text'] as String? ?? '',
       claimVeracity: _parseVeracity(
         json['claimVeracity'] as String? ?? json['claim_veracity'] as String?,
@@ -36,13 +60,8 @@ class FactCheckResult {
           (json['confidence_score'] as num?)?.toDouble() ?? 0.0,
       summaryAndExplanation: json['summaryAndExplanation'] as String? ??
           json['summary_and_explanation'] as String? ?? '',
-      keySource: json['keySource'] as String? ??
-          json['key_source'] as String? ??
-          (json['key_sources'] is List
-              ? (json['key_sources'] as List).isNotEmpty
-                  ? (json['key_sources'] as List).first as String?
-                  : null
-              : json['key_sources'] as String?),
+      keySource: sources.isNotEmpty ? sources.first : null,
+      keySources: sources,
     );
   }
 
