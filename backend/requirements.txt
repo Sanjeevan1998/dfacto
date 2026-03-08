@@ -11,3 +11,5 @@ langchain-community
 praw
 newsapi-python
 tavily-python
+browser-use
+playwright

@@ -1,13 +1,31 @@
 import os
 import json
 import concurrent.futures
+import datetime
 from typing import TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
 
-from agents.tools import search_internet, search_newsapi, search_reddit, search_tavily
+from agents.tools import agentic_browser_search
+import time
+import asyncio
+
+def llm_invoke_with_retry(llm, messages, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            return llm.invoke(messages)
+        except Exception as e:
+            if "429" in str(e) or "Resource exhaustion" in str(e).lower() or "quota" in str(e).lower():
+                if attempt < max_retries - 1:
+                    sleep_time = (2 ** attempt) * 2
+                    print(f"Quota exhausted. Retrying in {sleep_time} seconds...")
+                    time.sleep(sleep_time)
+                else:
+                    raise e
+            else:
+                raise e
 
 class EvidenceItem(BaseModel):
     source: str
@@ -15,9 +33,11 @@ class EvidenceItem(BaseModel):
     snippet: str
     stance: str  # support, contradict, neutral
     trust_weight: float
+    llm_confidence: float = 1.0
 
 class GraphState(TypedDict):
     transcript: str
+    source_url: Optional[str]
     core_claim: Optional[str]
     category: Optional[str]
     depth: int
@@ -37,7 +57,7 @@ def classify_claim(text: str) -> bool:
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", google_api_key=api_key, temperature=0.0)
     prompt = f"Does the following text contain a factual claim that can be verified and evaluated as true or false? Answer YES or NO.\nText: {text}"
     try:
-        response = llm.invoke([HumanMessage(content=prompt)])
+        response = llm_invoke_with_retry(llm, [HumanMessage(content=prompt)])
         content = response.content.strip().upper()
         return "YES" in content
     except Exception:
@@ -63,7 +83,7 @@ def extract_node(state: GraphState):
         HumanMessage(content=transcript)
     ]
     try:
-        response = llm.invoke(messages)
+        response = llm_invoke_with_retry(llm, messages)
         res_content = response.content.strip()
     except Exception as e:
         print(f"Error extracting claim: {e}")
@@ -98,21 +118,20 @@ def categorize_node(state: GraphState):
         
     return {"category": cat}
     
-def _evaluate_evidence(claim: str, source_name: str, search_result: str, weight: float) -> Optional[EvidenceItem]:
-    """Helper to evaluate single search result via LLM."""
+def _extract_evidence_items(claim: str, search_result: str) -> List[EvidenceItem]:
+    """Helper to parse out evidence from the browser search string."""
     if not search_result or search_result.strip() == "":
-        return None
+        return []
         
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key or api_key == "your_gemini_api_key_here":
-        # Cannot run LLM without real API key, fallback gracefully
-        return EvidenceItem(
-            source=source_name,
+        return [EvidenceItem(
+            source="Browser Agent",
             url="",
             snippet="Skipped evaluation (No API Key).",
             stance="neutral",
             trust_weight=0.0
-        )
+        )]
         
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", google_api_key=api_key, temperature=0.1)
     
@@ -120,63 +139,72 @@ def _evaluate_evidence(claim: str, source_name: str, search_result: str, weight:
     if not safe_search_result:
         safe_search_result = "No evidence found."
         
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    prompt_str = f"""You are a strict fact checking assistant. 
+Current System Time: {current_time}
+You are evaluating whether the given textual evidence supports or contradicts the claim.
+CRITICAL TEMPORAL INSTRUCTION: Use the Current System Time to determine if an event in the evidence is in the past, present, or future. If the evidence describes a speculative or future event relative to the Current System Time, it CANNOT support a claim that the event actually happened.
+
+Return EXACTLY as a JSON array of objects with no markdown blocks. 
+Each object must have:
+- 'stance' (support/contradict/neutral)
+- 'snippet' (a short quote from the text supporting the stance)
+- 'url' (if available in the text)
+- 'llm_confidence' (a float between 0.0 and 1.0 representing how sure you are of the stance based on the text)"""
+
     messages = [
-        SystemMessage(content="You are a strict fact checking assistant. Return EXACTLY as JSON with no markdown blocks. The JSON must have 'stance' (support/contradict/neutral), 'snippet' (a short quote), 'url' (if available), and 'llm_confidence' (a float between 0.0 and 1.0 representing how sure you are of the stance based on the text)."),
+        SystemMessage(content=prompt_str),
         HumanMessage(content=f"Claim: {claim}\nEvidence: {safe_search_result}")
     ]
     try:
-        response = llm.invoke(messages)
+        response = llm_invoke_with_retry(llm, messages)
         content = response.content.strip()
         if content.startswith("```json"): content = content[7:]
         if content.endswith("```"): content = content[:-3]
-        data = json.loads(content.strip())
+        data_list = json.loads(content.strip())
         
-        conf = data.get("llm_confidence", 1.0)
-        try:
-            conf = float(conf)
-            if conf > 1.0: conf = conf / 100.0 # Just in case it gives 80 instead of 0.8
-        except:
-            conf = 1.0
+        if isinstance(data_list, dict) and "stance" in data_list:
+            data_list = [data_list]
             
-        print(f"Parsed LLM confidence for {source_name}: {conf}")
-        return EvidenceItem(
-            source=source_name,
-            url=data.get("url", "") or "",
-            snippet=data.get("snippet", "") or "",
-            stance=data.get("stance", "neutral") or "neutral",
-            trust_weight=weight,
-            llm_confidence=conf
-        )
+        items = []
+        for data in data_list:
+            conf = data.get("llm_confidence", 1.0)
+            try:
+                conf = float(conf)
+                if conf > 1.0: conf = conf / 100.0
+            except:
+                conf = 1.0
+                
+            items.append(EvidenceItem(
+                source="Browser Agent Search",
+                url=data.get("url", "") or "",
+                snippet=data.get("snippet", "") or "",
+                stance=data.get("stance", "neutral") or "neutral",
+                trust_weight=1.0,
+                llm_confidence=conf
+            ))
+        return items
     except Exception as e:
-        print(f"Error evaluating evidence from {source_name}: {e}\nRaw LLM Content: {response.content if 'response' in locals() else 'N/A'}")
-        return None
+        print(f"Error evaluating evidence: {e}")
+        return []
 
 def fan_out_node(state: GraphState):
-    print("FactChecker -> Searching for evidence...")
+    print("FactChecker -> Searching for evidence via Agentic Browser...")
     claim = state.get("core_claim", state["transcript"])
     depth = state.get("depth", 0)
+    source_url = state.get("source_url")
     existing_evidence = state.get("worker_results", [])
     
-    query = f"fact check {claim}"
+    query = claim
+    headless_env = os.environ.get("HEADLESS_BROWSER", "True").lower() == "true"
     
-    # We run search workers concurrently
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        f_tavily = executor.submit(search_tavily, query)
-        f_ddg = executor.submit(search_internet, query)
+    try:
+        browser_res = asyncio.run(agentic_browser_search(query, task_type="fact_check", exclude_url=source_url, headless=headless_env))
+    except Exception as e:
+        print(f"Browser Agent Exception: {e}")
+        browser_res = ""
         
-        tavily_res = f_tavily.result()
-        ddg_res = f_ddg.result()
-        
-    # Evaluate findings asynchronously 
-    new_evidence = []
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        f1 = executor.submit(_evaluate_evidence, claim, "Tavily Search", tavily_res, 1.2)
-        f2 = executor.submit(_evaluate_evidence, claim, "Web Search", ddg_res, 0.8)
-        
-        e1 = f1.result()
-        if e1: new_evidence.append(e1)
-        e2 = f2.result()
-        if e2: new_evidence.append(e2)
+    new_evidence = _extract_evidence_items(claim, browser_res)
         
     return {
         "worker_results": existing_evidence + new_evidence,
@@ -195,7 +223,7 @@ def aggregate_node(state: GraphState):
     
     for item in evidence:
         # Dynamically adjust the base trust weight of the source by how confident the LLM was in its reading
-        true_weight = item.trust_weight * getattr(item, 'llm_confidence', 1.0)
+        true_weight = item.trust_weight * item.llm_confidence
         total_weight += true_weight
         
         if item.stance == "support":
@@ -243,16 +271,18 @@ def synthesize_node(state: GraphState):
         
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", google_api_key=api_key, temperature=0.1)
     
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     prompt = f"""
+    Current System Time: {current_time}
     Fact Check Result: {verdict}
     Claim: {claim}
     Evidence:
     {snippets}
     
-    Write a single-sentence concise explanation for WHY this claim is {verdict} based on the evidence.
+    Write a single-sentence concise explanation for WHY this claim is {verdict} based on the evidence. Ensure you reference temporal context accurately based on the Current System Time.
     """
     try:
-        response = llm.invoke([HumanMessage(content=prompt)])
+        response = llm_invoke_with_retry(llm, [HumanMessage(content=prompt)])
         summary = response.content.strip()
     except Exception as e:
         print(f"Error synthesizing: {e}")
@@ -278,7 +308,7 @@ workflow.add_edge("synthesize", END)
 
 fact_check_app = workflow.compile()
 
-def run_fact_checker(text: str) -> dict:
+def run_fact_checker(text: str, source_url: str = None) -> dict:
     """Entry point to run the fact checking pipeline on a text snippet."""
     
     if not classify_claim(text):
@@ -291,6 +321,7 @@ def run_fact_checker(text: str) -> dict:
     
     initial_state = {
         "transcript": text,
+        "source_url": source_url,
         "core_claim": None,
         "category": None,
         "depth": 0,

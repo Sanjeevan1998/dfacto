@@ -1,8 +1,62 @@
 import os
+import asyncio
+import datetime
 from langchain_community.tools import DuckDuckGoSearchRun
-from tavily import TavilyClient
-import praw
-from newsapi import NewsApiClient
+from browser_use import Agent, Browser, ChatGoogle
+
+async def agentic_browser_search(query: str, task_type: str = 'general', exclude_url: str | None = None, headless: bool = True) -> str:
+    """Search the internet autonomously using a multi-modal browser agent."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key or api_key == "your_gemini_api_key_here":
+        return "Agentic Browser Search: API key not provided."
+        
+    llm = ChatGoogle(model="gemini-2.5-pro", api_key=api_key)
+    
+    browser = Browser(headless=headless)
+    
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    task_instructions = f"Current System Time: {current_time}. Search the web for the following query: '{query}'. "
+    
+    if task_type == 'fact_check':
+        task_instructions += (
+            "This is a careful fact-checking data gathering task. "
+            "STEP 1: Find at max 2 articles related to this query to understand the context and establish a 'meaningful headline'. "
+            "STEP 2: Use this exact headline to gather evidence by searching for it directly (do NOT write 'fact check' in the search box). "
+            "STEP 3: Extract the headlines, publication dates, and full text of the articles you find. "
+            "STEP 4: IMPORTANT: Do NOT attempt to output a true/false verdict or judge the claim yourself. Your ONLY job is to gather and return the raw textual evidence so that a downstream LLM can make the final logical decision."
+        )
+        
+    if exclude_url:
+        task_instructions += f"CRITICAL: Do NOT click on or extract data from this exact domain/URL: {exclude_url}. "
+        
+    task_instructions += '''
+    CRITICAL RULES to prevent infinite loops:
+    1. Maximum Depth: Click into a maximum of 3-5 links. Immediately close tabs after reading to prevent memory crashes.
+    2. Popup Handling: Use the browser `go_back` or equivalent action if you encounter an unclosable popup, cookie banner, or paywall.
+    
+    Gather comprehensive context, headlines, snippets, and source URLs. 
+    Return a detailed summary of your findings including the original sources.
+    '''
+    
+    try:
+        agent = Agent(task=task_instructions, llm=llm, browser=browser)
+        result = await agent.run()
+        
+        # Ensure we return a complete string summary
+        final_text = ""
+        if hasattr(result, 'final_result') and result.final_result():
+            final_text = result.final_result()
+        elif hasattr(result, 'history') and result.history:
+            # Fallback if no clean final result
+            final_text = "\n".join([str(h.result) for h in result.history if h.result])
+        else:
+            final_text = str(result)
+            
+        return final_text if final_text else "No relevant context extracted."
+    except Exception as e:
+        return f"Browser Agent Error: {e}"
+    finally:
+        await browser.stop()
 
 def search_internet(query: str) -> str:
     """Search the internet using DuckDuckGo."""
