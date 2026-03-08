@@ -1,27 +1,23 @@
-# Dfacto: Agentic News Crawler & Fact-Checker
+# Dfacto
 
-Dfacto is a Next-Generation AI Agent pipeline that proactively scours the web for trending information and rigorously fact-checks claims using advanced Multi-Modal Browser Agents and LLM-driven LangGraph workflows. 
+**Team Name:** Facters
+**Team Members:** Erin Kong, Arnab Bhowal, Nasir Hasan Dilawar, and Sanjeevan Adhikari
 
-Rather than relying on outdated static APIs, Dfacto utilizes a Playwright-driven headless browser powered by Google's Gemini 2.5 Flash to visually inspect, read, and extract data from the live internet exactly as a human would.
+Currently in development, Dfacto aims to provide comprehensive, real-time fact-checking across various modalities. The application is designed to support four core features:
 
-## Project Layout
+1. **Live Conversation Fact-Checking**: Auditing live audio (e.g., debates, interviews) to fact-check statements in real-time with proper sources.
+2. **Media & Link Verification**: Analyzing shared images, videos, and URLs to verify the authenticity of the contents.
+3. **Interactive Mode**: A conversational interface where users can chat with the app to get help fact-checking specific claims.
+4. **Agentic News Crawler**: Continuously monitoring the web for live, factual news based on user-preset keywords and schedules.
 
-The repository is cleanly divided into a backend agentic engine and a frontend display application.
+## Branches & Working Modules
 
-- **`/backend` (Python / FastAPI / LangGraph / Playwright)**
-  The brain of the system. It consists of multiple orchestrated LLM workflows. It runs on a scheduled interval to crawl the internet for specified phrases, extract unique claims, actively browse the internet *again* to find contradictory or supporting evidence, and aggregate a final fact-checking verdict and explanation.
-  *(See `backend/README.md` for a highly detailed flow chart breakdown of the architectural design).*
+Since this was a hackathon project, we didn't get the time to complete everything and integrate it together, so the working modules are in different branches. Here are the branch names and what each branch contains:
 
-- **`/frontend` (Flutter Web Application)**
-  A sleek, cross-platform interface allowing users to configure the backend crawler's target keywords and intervals. It cleanly presents the extracted headlines alongside their categorical fact-check verdicts (TRUE, FALSE, MIXED) using aesthetic Material 3 components.
-  *(See `frontend/README.md` for details on the Flutter widget tree and API connections).*
-
-## Getting Started Overview
-
-To run Dfacto locally, you will need to simultaneously run the backend server and the frontend application.
-
-1. Ensure you have an active `GEMINI_API_KEY` saved in `backend/.env`.
-2. Boot up the backend using Python (`uvicorn main:app --port 8000`).
-3. Boot up the frontend using Flutter (`flutter run -d chrome`).
-
-See the individual directory READMEs for deeper setup instructions and architecture details.
+- **`main`** - Only has News Search based on keyword and fact check on the found news.
+- **`feature/multimodalnewssearch`** - Only has News Search based on keyword and fact check on the found news. But the different element is that unlike `main`, it gets the news data and does the fact checking using a browser agent, which replicates how a user would do a fact check in real time.
+- **`live-v2-working`** - Final working version of `live-audit` from `live-audit-v2` with minor bug fixes.
+- **`live-audit-v3`** - Added the changes to make it decoupled.
+- **`live-audit-v2`** - Perfected the live fact checking with real time audio stream with real time follow up questions for the fact check results.
+- **`live-audit`** - Initial changes with just the live transcription of the real time audio stream.
+- **`ux-ui`** - This stores the UI changes.
