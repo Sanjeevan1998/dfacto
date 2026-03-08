@@ -30,8 +30,9 @@ Layer 2 — Agent 1b: Topic-Aware TranscriptBuffer + Segmenter
           ONGOING   → TranscriptBuffer.prepend_ongoing()  (carry into next cycle)
     Session history (all isFinal words) is maintained separately for context.
 
-Layer 3 — Agent 1c → LangGraph pipeline
-    classify_claim (Agent 0) → run_pipeline_from_claim → result to Flutter.
+Layer 3 — Ingestion Gateway → Fact-Check Microservice
+    classify_claim (Agent 1c) → FactCheckRequest → process_fact_check() → result to Flutter.
+    live_audit.py has NO knowledge of LangGraph internals.
 """
 
 from __future__ import annotations
@@ -44,8 +45,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from agents.claim_classifier import extract_all_claims
-from agents.supervisor import run_pipeline_from_claim
 from agents.topic_segmenter import segment_topics
+from models.fact_check import FactCheckRequest
+from routers.fact_check import process_fact_check
 
 logger = logging.getLogger("dfacto.live_audit")
 
@@ -147,8 +149,10 @@ async def _fact_check_and_send(
     history: ClaimHistory,
 ) -> None:
     """
-    Background coroutine: classify a COMPLETED topic block, run LangGraph
-    pipeline if a checkable, non-duplicate claim is found, push result to Flutter.
+    Background coroutine: classify a COMPLETED topic block, package a
+    FactCheckRequest, call the Fact-Check Microservice, push result to Flutter.
+
+    This function is the hard boundary — it has NO knowledge of LangGraph internals.
     """
     topic_text = topic_text.strip()
     if not topic_text:
@@ -184,7 +188,7 @@ async def _fact_check_and_send(
             continue
 
         history.add(claim)
-        logger.info("Claim → pipeline: %r", claim[:100])
+        logger.info("Claim → Fact-Check Microservice: %r", claim[:100])
 
         # Immediately notify Flutter that this claim is being checked
         try:
@@ -192,28 +196,48 @@ async def _fact_check_and_send(
         except Exception:
             pass
 
+        # ── Microservice call (replaces direct run_pipeline_from_claim) ────────
         try:
-            result = await asyncio.to_thread(run_pipeline_from_claim, claim)
+            request = FactCheckRequest(
+                claim=claim,
+                context=session_context or None,
+                source_type="live_audit",
+            )
+            response = await asyncio.to_thread(process_fact_check, request)
         except Exception as exc:
-            logger.exception("run_pipeline_from_claim error: %s", exc)
-            # Notify Flutter the check failed
+            logger.exception("process_fact_check error: %s", exc)
             try:
-                await ws.send_text(json.dumps({"type": "checking_failed", "claimText": claim}))
+                await ws.send_text(
+                    json.dumps({"type": "checking_failed", "claimText": claim})
+                )
             except Exception:
                 pass
             continue
 
-        if result:
-            result["type"] = "result"
-            try:
-                await ws.send_text(json.dumps(result))
-                logger.info(
-                    "Result sent: verdict=%s confidence=%.2f",
-                    result.get("claimVeracity"),
-                    result.get("confidenceScore", 0.0),
-                )
-            except Exception:
-                pass
+        if response is None:
+            logger.info("Microservice returned None for claim %r", claim[:100])
+            continue
+
+        # Convert FactCheckResponse → existing Flutter wire format
+        payload = {
+            "type":                  "result",
+            "id":                    response.id,
+            "claimText":             response.claim_text,
+            "claimVeracity":         response.claim_veracity,
+            "confidenceScore":       response.confidence_score,
+            "summaryAndExplanation": response.summary_and_explanation,
+            "keySource":             response.key_source,
+            "key_sources":           response.key_sources,
+        }
+        try:
+            await ws.send_text(json.dumps(payload))
+            logger.info(
+                "Result sent: verdict=%s confidence=%.2f",
+                response.claim_veracity,
+                response.confidence_score,
+            )
+        except Exception:
+            pass
 
 
 # ── Layer 2: Agent 1b — topic-aware pump ──────────────────────────────────────

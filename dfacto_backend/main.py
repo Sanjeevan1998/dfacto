@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers.live_audit import router as live_audit_router
 from routers.debug import router as debug_router
+from routers.fact_check import router as fact_check_router
 
 load_dotenv()
 
@@ -42,8 +43,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Dfacto API",
-    description="Real-time fact-checking backend for the Live Audit pipeline.",
-    version="0.2.0",
+    description="Real-time fact-checking backend. v0.3: decoupled Fact-Check microservice.",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -57,8 +58,9 @@ app.add_middleware(
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-app.include_router(live_audit_router)
-app.include_router(debug_router)
+app.include_router(fact_check_router)   # POST /fact-check — source-agnostic engine
+app.include_router(live_audit_router)   # WS /ws/live-audit — ingestion gateway
+app.include_router(debug_router)        # GET+POST /debug/*
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
