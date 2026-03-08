@@ -34,6 +34,7 @@ from agents.worker_web import search_web
 from agents.worker_trusted import search_trusted_dbs
 from agents.worker_social import search_social
 from agents.worker_multimodal import analyze_multimodal
+from agents.worker_news import search_news
 
 logger = logging.getLogger("dfacto.supervisor")
 
@@ -69,18 +70,56 @@ _CATEGORY_KEYWORDS = {
     "economic": ["gdp", "economy", "inflation", "unemployment", "recession", "market", "trade", "tax"],
 }
 
+_QUERY_COMPRESS_THRESHOLD = 60  # chars; below this, use claim verbatim
+
+
+def _compress_to_query(claim: str) -> str:
+    """
+    Use Gemini to distil a long claim into a compact 8-10 word search query.
+    Called once per pipeline run — all 4 workers share the result.
+    Falls back to first-sentence truncation if Gemini fails.
+    """
+    try:
+        resp = _get_gemini_client().models.generate_content(
+            model="gemini-2.5-flash",
+            contents=(
+                "Extract the 8-10 most important searchable keywords from this claim "
+                "to use as a web search query. Return ONLY the search query — no quotes, "
+                "no explanation, no punctuation.\n\n"
+                f'Claim: "{claim}"'
+            ),
+            config=genai_types.GenerateContentConfig(
+                temperature=0,
+                max_output_tokens=30,
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        query = resp.text.strip().strip('"').strip("'")
+        logger.info("Compressed search query: %r (from %d-char claim)", query, len(claim))
+        return query[:120]
+    except Exception as exc:
+        logger.warning("Query compression failed, using truncated claim: %s", exc)
+        first = claim.split(".")[0].strip()
+        return (first if len(first) >= 15 else claim)[:120]
+
 
 def node_categorize(state: GraphState) -> dict:
-    """Keyword-based claim categorisation. Short-circuits if no claim found."""
+    """Keyword-based claim categorisation + search query compression."""
     if not state.core_claim.strip():
         logger.info("No claim found — skipping workers.")
         return {"category": "none", "confidence": 0.0, "verdict": "UNKNOWN"}
-    claim_lower = state.core_claim.lower()
+
+    # Compress long claims to a compact search query (one Gemini call, shared by all workers)
+    claim = state.core_claim
+    search_query = claim if len(claim) <= _QUERY_COMPRESS_THRESHOLD else _compress_to_query(claim)
+
+    claim_lower = claim.lower()
     for category, keywords in _CATEGORY_KEYWORDS.items():
         if any(kw in claim_lower for kw in keywords):
-            logger.info("Category: %s", category)
-            return {"category": category}
-    return {"category": "other"}
+            logger.info("Category: %s  search_query: %r", category, search_query)
+            return {"category": category, "search_query": search_query}
+    logger.info("Category: other  search_query: %r", search_query)
+    return {"category": "other", "search_query": search_query}
 
 
 def node_fan_out(state: GraphState) -> dict:
@@ -89,22 +128,27 @@ def node_fan_out(state: GraphState) -> dict:
     if not claim:
         return {"worker_results": []}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        future_web = executor.submit(search_web, claim)
-        future_trusted = executor.submit(search_trusted_dbs, claim)
-        future_social = executor.submit(search_social, claim)
-        future_multimodal = executor.submit(analyze_multimodal, claim)
+    # Use the pre-compressed search query (generated once in node_categorize)
+    q = state.search_query or claim[:120]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        future_web = executor.submit(search_web, claim, q)
+        future_trusted = executor.submit(search_trusted_dbs, claim, q)
+        future_social = executor.submit(search_social, claim, q)
+        future_multimodal = executor.submit(analyze_multimodal, claim, q)
+        future_news = executor.submit(search_news, claim, q)
 
         web_results = future_web.result()
         trusted_results = future_trusted.result()
         social_results = future_social.result()
         multimodal_results = future_multimodal.result()
+        news_results = future_news.result()
 
-    all_results = web_results + trusted_results + social_results + multimodal_results
+    all_results = web_results + trusted_results + social_results + multimodal_results + news_results
     logger.info(
-        "fan_out: %d web + %d trusted + %d social + %d multimodal = %d total",
+        "fan_out: %d web + %d trusted + %d social + %d multimodal + %d news = %d total",
         len(web_results), len(trusted_results), len(social_results),
-        len(multimodal_results), len(all_results),
+        len(multimodal_results), len(news_results), len(all_results),
     )
     return {"worker_results": [EvidenceItem(**r) for r in all_results]}
 

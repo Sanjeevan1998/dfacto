@@ -54,17 +54,30 @@ def _get_tavily_tool(max_results: int = 3) -> TavilySearch:
     )
 
 
-def search_trusted_dbs(claim: str) -> list[dict]:
+def _search_query(claim: str) -> str:
+    """
+    Build a compact Tavily search query from the claim.
+    Tavily performs poorly on queries >120 chars; use the first sentence
+    or truncate to keep it focused and searchable.
+    """
+    first_sentence = claim.split(".")[0].strip()
+    query = first_sentence if len(first_sentence) >= 15 else claim
+    return query[:120]
+
+
+def search_trusted_dbs(claim: str, search_query: str = "") -> list[dict]:
     """
     Query Snopes, PolitiFact, and FactCheck.org via Tavily.
     Tavily restricts results to those domains — no secondary HTTP requests.
+    search_query: pre-compressed query from node_categorize; falls back to claim truncation.
     """
     if not claim:
         return []
 
+    q = search_query.strip() or _search_query(claim)
     try:
         tool = _get_tavily_tool()
-        response = tool.invoke({"query": claim})
+        response = tool.invoke({"query": q})
         # TavilySearch returns a dict with a 'results' list
         if isinstance(response, dict):
             raw_results = response.get("results", [])

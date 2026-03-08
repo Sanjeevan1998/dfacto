@@ -26,7 +26,7 @@ class WebSocketService {
       _transcriptController?.stream;
 
   /// Connect to the FastAPI WebSocket endpoint.
-  void connect({String host = '192.168.1.158', int port = 8001}) {
+  void connect({String host = '192.168.1.158', int port = 8000}) {
     final uri = Uri.parse('ws://$host:$port/ws/live-audit');
     _resultController = StreamController<FactCheckResult>.broadcast();
     _doneController = StreamController<void>.broadcast();

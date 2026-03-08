@@ -43,7 +43,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
-from agents.claim_classifier import classify_claim
+from agents.claim_classifier import extract_all_claims
 from agents.supervisor import run_pipeline_from_claim
 from agents.topic_segmenter import segment_topics
 
@@ -161,51 +161,48 @@ async def _fact_check_and_send(
     )
 
     try:
-        classification = await asyncio.to_thread(
-            classify_claim, topic_text, session_context, history.recent()
+        claims = await asyncio.to_thread(
+            extract_all_claims, topic_text, session_context, history.recent()
         )
     except Exception as exc:
-        logger.exception("classify_claim error: %s", exc)
+        logger.exception("extract_all_claims error: %s", exc)
         return
 
-    is_claim = classification.get("is_claim", False)
-    needs_context = classification.get("needs_context", False)
-
-    if not (is_claim and not needs_context):
-        logger.info(
-            "No actionable claim (is_claim=%s needs_context=%s) — skipped",
-            is_claim, needs_context,
-        )
+    if not claims:
+        logger.info("No verifiable claims found in topic block — skipped")
         return
 
-    if classification.get("is_duplicate", False):
-        logger.info(
-            "Duplicate claim — silently discarded: %r",
-            classification.get("extracted_claim", topic_text)[:100],
-        )
-        return
+    logger.info("Extracted %d claim(s) from topic block", len(claims))
 
-    claim = classification.get("extracted_claim", "").strip() or topic_text
-    history.add(claim)
-    logger.info("Claim extracted — running pipeline: %r", claim[:100])
+    for claim_obj in claims:
+        claim = claim_obj.get("claim", "").strip()
+        if not claim:
+            continue
 
-    try:
-        result = await asyncio.to_thread(run_pipeline_from_claim, claim)
-    except Exception as exc:
-        logger.exception("run_pipeline_from_claim error: %s", exc)
-        return
+        if claim_obj.get("is_duplicate", False):
+            logger.info("Duplicate claim — silently discarded: %r", claim[:100])
+            continue
 
-    if result:
-        result["type"] = "result"
+        history.add(claim)
+        logger.info("Claim → pipeline: %r", claim[:100])
+
         try:
-            await ws.send_text(json.dumps(result))
-            logger.info(
-                "Result sent: verdict=%s confidence=%.2f",
-                result.get("claimVeracity"),
-                result.get("confidenceScore", 0.0),
-            )
-        except Exception:
-            pass
+            result = await asyncio.to_thread(run_pipeline_from_claim, claim)
+        except Exception as exc:
+            logger.exception("run_pipeline_from_claim error: %s", exc)
+            continue
+
+        if result:
+            result["type"] = "result"
+            try:
+                await ws.send_text(json.dumps(result))
+                logger.info(
+                    "Result sent: verdict=%s confidence=%.2f",
+                    result.get("claimVeracity"),
+                    result.get("confidenceScore", 0.0),
+                )
+            except Exception:
+                pass
 
 
 # ── Layer 2: Agent 1b — topic-aware pump ──────────────────────────────────────

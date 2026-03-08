@@ -20,7 +20,7 @@ import urllib.request
 
 logger = logging.getLogger("dfacto.worker_social")
 
-_REDDIT_SUBREDDITS = ["factcheck", "skeptic", "news", "worldnews"]
+_REDDIT_SUBREDDITS = ["news", "worldnews", "factcheck", "politics"]
 _REDDIT_HEADERS = {"User-Agent": "dfacto-factchecker/1.0 (research tool)"}
 _REQUEST_TIMEOUT = 6
 
@@ -45,9 +45,16 @@ def _keyword_stance(text: str) -> str:
     return "neutral"
 
 
+def _search_query(claim: str) -> str:
+    """Compact query: first sentence or 100-char truncation, whichever is shorter."""
+    first_sentence = claim.split(".")[0].strip()
+    query = first_sentence if len(first_sentence) >= 10 else claim
+    return query[:100]
+
+
 def _reddit_search(claim: str, subreddit: str) -> list[dict]:
     """Search a subreddit for posts matching the claim via Reddit's JSON API."""
-    encoded = urllib.parse.quote(claim)
+    encoded = urllib.parse.quote(_search_query(claim))
     url = f"https://www.reddit.com/r/{subreddit}/search.json?q={encoded}&restrict_sr=1&sort=relevance&limit=3&t=year"
     try:
         req = urllib.request.Request(url, headers=_REDDIT_HEADERS)
@@ -60,14 +67,16 @@ def _reddit_search(claim: str, subreddit: str) -> list[dict]:
         return []
 
 
-def search_social(claim: str) -> list[dict]:
+def search_social(claim: str, search_query: str = "") -> list[dict]:
     """
     Query Reddit subreddits for public discourse on the claim.
     Returns up to 3 evidence items representing social signal.
+    search_query: pre-compressed query from node_categorize; falls back to claim truncation.
     """
     if not claim:
         return []
 
+    q = search_query.strip() or _search_query(claim)
     seen_urls: set[str] = set()
     results: list[dict] = []
 
@@ -75,7 +84,7 @@ def search_social(claim: str) -> list[dict]:
         if len(results) >= 3:
             break
 
-        posts = _reddit_search(claim, subreddit)
+        posts = _reddit_search(q, subreddit)
         for post in posts:
             if len(results) >= 3:
                 break

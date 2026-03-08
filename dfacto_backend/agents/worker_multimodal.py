@@ -62,14 +62,16 @@ def _build_evidence_block(tavily_results: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def analyze_multimodal(claim: str, max_results: int = 4) -> list[dict]:
+def analyze_multimodal(claim: str, search_query: str = "", max_results: int = 4) -> list[dict]:
     """
     Deep semantic analysis of claim using Tavily evidence + Gemini reasoning.
     Returns a single consolidated evidence item (the multimodal analysis).
+    search_query: pre-compressed query from node_categorize; falls back to claim truncation.
     """
     if not claim:
         return []
 
+    q = search_query.strip() or claim[:120]
     # Fetch broad context with Tavily
     try:
         tool = TavilySearch(
@@ -78,7 +80,7 @@ def analyze_multimodal(claim: str, max_results: int = 4) -> list[dict]:
             include_answer=True,
             include_raw_content=False,
         )
-        response = tool.invoke({"query": f'analysis context "{claim}"'})
+        response = tool.invoke({"query": f'analysis context {q}'})
         # TavilySearch returns a dict with a 'results' list
         tavily_results = response.get("results", []) if isinstance(response, dict) else []
     except Exception as exc:

@@ -51,6 +51,11 @@ class GraphState(BaseModel):
         default="unknown",
         description="Claim category: political | scientific | economic | other",
     )
+    search_query: str = Field(
+        default="",
+        description="Compact 8-10 word search query derived from core_claim by Gemini. "
+                    "Used by all workers for Tavily/Reddit — avoids passing long prose.",
+    )
 
     # ── Recursion Control ─────────────────────────────────────────────────────
     depth: int = Field(

@@ -127,11 +127,12 @@ def segment_topics(chunk: str, session_context: str = "") -> list[TopicBlock]:
 
     try:
         resp = _get_client().models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=[prompt],
             config=genai_types.GenerateContentConfig(
                 temperature=0.1,
                 max_output_tokens=600,
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
             ),
         )
         raw = resp.text.strip()

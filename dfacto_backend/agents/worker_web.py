@@ -102,17 +102,30 @@ def _classify_stance(claim: str, url: str, content: str, trust_weight: float, so
         return _keyword_stance(claim, url, content, trust_weight, source)
 
 
-def search_web(claim: str, max_results: int = 5) -> list[dict]:
+def _search_query(claim: str) -> str:
+    """
+    Build a compact Tavily search query from the claim.
+    Tavily performs poorly on queries >120 chars; use the first sentence
+    or truncate to keep it focused and searchable.
+    """
+    first_sentence = claim.split(".")[0].strip()
+    query = first_sentence if len(first_sentence) >= 15 else claim
+    return query[:120]
+
+
+def search_web(claim: str, search_query: str = "", max_results: int = 5) -> list[dict]:
     """
     Fetch fact-check evidence for the claim using Tavily.
     Tavily returns pre-cleaned LLM-ready text — no secondary HTTP requests needed.
+    search_query: pre-compressed query from node_categorize; falls back to claim truncation.
     """
     if not claim or not claim.strip():
         return []
 
+    q = search_query.strip() or _search_query(claim)
     try:
         tool = _get_tavily_tool(max_results=max_results)
-        response = tool.invoke({"query": f'fact check "{claim}"'})
+        response = tool.invoke({"query": f'fact check {q}'})
         # TavilySearch returns a dict with a 'results' list
         if isinstance(response, dict):
             raw_results = response.get("results", [])

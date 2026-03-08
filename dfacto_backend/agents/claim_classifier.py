@@ -47,6 +47,7 @@ Rules:
 - If the prior context resolves what 'that'/'it'/'he' refers to, set needs_context=false and write a fully resolved extracted_claim.
 - extracted_claim must be understandable without any surrounding context — it must name subjects explicitly.
 - CONSOLIDATION RULE: If the new phrase contains multiple statements that mean the same thing (e.g. "Vaccines cause autism" and "There is a proven link between shots and autism"), merge them into ONE single canonical extracted_claim. Never output more than one claim.
+- FOCUS RULE: extracted_claim must be a single SHORT declarative sentence (target under 25 words, hard limit 40 words). If the text describes multiple distinct events (e.g. flooding in Michigan AND tornadoes in Oklahoma), extract only the single most specific and checkable fact — typically the one with a named subject, number, or location. Do NOT chain multiple events into one long run-on sentence.
 - DUPLICATE RULE: Compare extracted_claim against the recent_claims list (if provided). Set is_duplicate=true if the new claim is semantically identical or a direct paraphrase of any recent claim — even if worded differently. Set is_duplicate=false if no recent_claims are provided or the claim is genuinely new.
 
 Examples:
@@ -154,3 +155,106 @@ def classify_claim(
             "is_duplicate": False,  # heuristic path cannot detect semantic duplicates
             "source": "heuristic",
         }
+
+
+_MULTI_CLAIM_PROMPT = """You are a claim extractor for a real-time fact-checking system.
+
+Extract ALL distinct verifiable factual claims from the text below.
+Respond ONLY with a JSON array — each element is an object with two keys:
+  "claim": "<standalone declarative sentence, 10-30 words, fully self-contained>",
+  "is_duplicate": <true if this claim is semantically identical or a direct paraphrase of any claim in the recent_claims list, false otherwise>
+
+Rules:
+- Extract EVERY distinct verifiable fact (named people, numbers, locations, events, statistics).
+- Do NOT merge unrelated facts into one — keep them separate.
+- Each claim must be understandable without surrounding context — name subjects explicitly.
+- Resolve pronouns using the prior session context if provided.
+- Keep each claim SHORT (10-30 words, hard limit 40 words).
+- Conversational filler, opinions, questions, greetings → do not extract.
+- If no verifiable claims exist, return an empty array: []
+
+Examples of good extraction from "Seven tornadoes hit Texas. Two people, Jody Owens and her daughter Lexi, died when their car was swept away":
+[
+  {"claim": "Seven tornadoes struck Texas, Kansas, and Oklahoma.", "is_duplicate": false},
+  {"claim": "Jody Owens and her teenage daughter Lexi were killed when their vehicle was swept off the road by a tornado.", "is_duplicate": false}
+]
+"""
+
+
+def extract_all_claims(
+    text: str,
+    full_context: str = "",
+    recent_claims: list[str] | None = None,
+) -> list[dict]:
+    """
+    Extract ALL distinct verifiable claims from a completed topic block.
+
+    Args:
+        text: The completed topic block text.
+        full_context: Full session transcript for referential resolution.
+        recent_claims: Already-processed claims this session (for is_duplicate check).
+
+    Returns:
+        List of {"claim": str, "is_duplicate": bool} dicts.
+        Empty list if no verifiable claims found or on error.
+    """
+    text = text.strip()
+    if not text or len(text.split()) < 3:
+        return []
+
+    try:
+        client = _get_client()
+        context_section = (
+            f'\n\nPrior session context:\n"""{full_context}"""\n'
+            if full_context.strip()
+            else ""
+        )
+        recent_section = ""
+        if recent_claims:
+            numbered = "\n".join(f"  {i+1}. {c}" for i, c in enumerate(recent_claims))
+            recent_section = f"\n\nRecent already-checked claims (use for is_duplicate):\n{numbered}\n"
+
+        prompt = (
+            f"{_MULTI_CLAIM_PROMPT}"
+            f"{context_section}{recent_section}"
+            f'\n\nText to extract claims from:\n"""{text}"""'
+        )
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=400,
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        raw = response.text.strip()
+        s, e = raw.find("["), raw.rfind("]")
+        if s == -1 or e == -1:
+            return []
+        claims_list = json.loads(raw[s : e + 1])
+        if not isinstance(claims_list, list):
+            return []
+
+        results = []
+        for item in claims_list:
+            claim_text = item.get("claim", "").strip()
+            if claim_text:
+                results.append({
+                    "claim": claim_text,
+                    "is_duplicate": bool(item.get("is_duplicate", False)),
+                })
+        logger.info(
+            "extract_all_claims: %d claim(s) found, %d duplicate(s)",
+            len(results),
+            sum(1 for r in results if r["is_duplicate"]),
+        )
+        return results
+
+    except Exception as exc:
+        logger.warning("extract_all_claims failed, falling back to classify_claim: %s", exc)
+        # Graceful fallback: use single-claim classifier
+        single = classify_claim(text, full_context, recent_claims)
+        if single.get("is_claim") and not single.get("needs_context") and single.get("extracted_claim"):
+            return [{"claim": single["extracted_claim"], "is_duplicate": single.get("is_duplicate", False)}]
+        return []
