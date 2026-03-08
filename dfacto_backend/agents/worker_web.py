@@ -37,7 +37,7 @@ def _get_client() -> genai.Client:
 def _get_tavily_tool(max_results: int = 5) -> TavilySearch:
     return TavilySearch(
         max_results=max_results,
-        search_depth="advanced",
+        search_depth="basic",  # "advanced" burns ~3x Tavily credits; basic is sufficient
         include_answer=True,
         include_raw_content=False,
     )

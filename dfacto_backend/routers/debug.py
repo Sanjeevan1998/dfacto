@@ -169,7 +169,7 @@ class FollowupRequest(BaseModel):
 async def debug_followup(body: FollowupRequest):
     """
     Answer a follow-up question about a fact-checked claim.
-    Uses Tavily web search + Gemini to synthesize a short, direct answer.
+    Uses raw Tavily (no per-result Gemini stance calls) + single Gemini synthesis.
 
     Example:
         curl -X POST http://localhost:8000/debug/followup \\
@@ -180,7 +180,7 @@ async def debug_followup(body: FollowupRequest):
     import os
     from google import genai
     from google.genai import types as genai_types
-    from agents.worker_web import search_web
+    from langchain_tavily import TavilySearch
 
     question = body.question.strip()
     claim = body.claim.strip()
@@ -189,32 +189,48 @@ async def debug_followup(body: FollowupRequest):
 
     logger.info("Follow-up question for claim %r: %r", claim[:80], question[:80])
 
-    # Search for relevant evidence using the question as the query
+    # Raw Tavily search — no per-result Gemini stance calls, much faster
     search_q = f"{claim[:60]} {question[:60]}"
+    raw_results = []
+    tavily_answer = ""
     try:
-        evidence = await asyncio.to_thread(search_web, claim, search_q, max_results=4)
-    except Exception:
-        evidence = []
+        tool = TavilySearch(
+            max_results=4,
+            search_depth="basic",
+            include_answer=True,
+            include_raw_content=False,
+        )
+        response = await asyncio.to_thread(tool.invoke, {"query": search_q})
+        if isinstance(response, dict):
+            raw_results = response.get("results", [])
+            tavily_answer = response.get("answer", "") or ""
+    except Exception as exc:
+        logger.warning("Tavily follow-up search failed: %s", exc)
 
-    # Build evidence context
-    excerpts = "\n".join(
-        f"- [{e.get('source','')}] {e.get('excerpt','')}"
-        for e in evidence[:4]
-    ) if evidence else "No additional sources found."
+    # Build evidence string from raw Tavily content (no extra Gemini calls per result)
+    parts = []
+    if tavily_answer:
+        parts.append(f"[Web summary] {tavily_answer[:400]}")
+    for r in raw_results[:3]:
+        src = r.get("url", "")
+        content = (r.get("content") or "").strip()[:300]
+        if content:
+            parts.append(f"[{src}] {content}")
+    excerpts = "\n".join(parts) or "No additional sources found."
 
-    # Ask Gemini to synthesize a focused answer
+    # Single Gemini call to synthesize the answer
     prompt = f"""You are a fact-check assistant. Answer the follow-up question below concisely (2-4 sentences max).
-Use the provided evidence and original claim context. Be direct and cite sources where relevant.
+Use the provided evidence and original claim context. Be direct and factual. No markdown.
 
 Original claim: "{claim}"
 {f'Fact-check context: {body.context}' if body.context else ''}
 
 Follow-up question: "{question}"
 
-Evidence from web search:
+Evidence:
 {excerpts}
 
-Answer (plain text only, no markdown, 2-4 sentences):"""
+Answer (plain text only, 2-4 sentences):"""
 
     try:
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -228,6 +244,8 @@ Answer (plain text only, no markdown, 2-4 sentences):"""
             ),
         )
         answer = response.text.strip()
+        if not answer:
+            answer = "No answer found."
     except Exception as exc:
         logger.warning("Follow-up Gemini error: %s", exc)
         answer = "Unable to retrieve an answer at this time."

@@ -250,16 +250,77 @@ def _build_evidence_block(items: list[EvidenceItem]) -> str:
     return "\n\n".join(parts)
 
 
+_KNOWLEDGE_JUDGE_PROMPT = """\
+You are a fact-checker. No real-time web sources are available, so use your training knowledge only.
+
+Claim: "{claim}"
+
+Evaluate this claim as accurately as possible. Clearly state if the claim is likely true, false, or difficult to verify without current data.
+
+Respond ONLY with valid JSON (no markdown, no code fences):
+{{
+  "verdict": "<TRUE|MOSTLY TRUE|HALF TRUE|MOSTLY FALSE|FALSE|UNVERIFIABLE>",
+  "confidence": <0.3-0.7>,
+  "explanation": "<2-3 sentence plain-text answer based on general knowledge. Mention that no real-time sources were available.>",
+  "key_source": null
+}}
+"""
+
+
+def _judge_from_knowledge(claim: str) -> dict:
+    """Fallback: use Gemini's training knowledge when all workers returned empty."""
+    try:
+        resp = _get_gemini_client().models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[_KNOWLEDGE_JUDGE_PROMPT.format(claim=claim)],
+            config=genai_types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=300,
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        raw = resp.text.strip()
+        s, e = raw.find("{"), raw.rfind("}")
+        if s != -1 and e != -1:
+            raw = raw[s : e + 1]
+        parsed = json.loads(raw)
+        verdict = parsed.get("verdict", "UNVERIFIABLE").upper()
+        confidence = float(parsed.get("confidence", 0.4))
+        explanation = parsed.get("explanation", "")
+        logger.info("Knowledge-only judge: verdict=%s confidence=%.2f", verdict, confidence)
+        return {
+            "verdict": verdict,
+            "confidence": confidence,
+            "summary": explanation,
+            "source_url": None,
+            "source_urls": [],
+        }
+    except Exception as exc:
+        logger.warning("Knowledge-only judge failed: %s", exc)
+        return {
+            "verdict": "UNVERIFIABLE",
+            "confidence": 0.0,
+            "summary": "No sources were available to verify this claim.",
+            "source_url": None,
+            "source_urls": [],
+        }
+
+
 def node_judge(state: GraphState) -> dict:
     """
     Agent 2e — Final Judge.
     Uses Gemini to critically evaluate all evidence and produce a 6-category verdict.
     Evidence is sorted by trust_weight; trusted fact-checkers are explicitly prioritized.
-    Falls back to coarse aggregate verdict if Gemini fails.
+    Falls back to Gemini knowledge-only verdict if no worker evidence exists.
     """
     items = state.worker_results
-    if not items or not state.core_claim.strip():
-        return {}  # No change — synthesize will use aggregate verdict
+    if not state.core_claim.strip():
+        return {}  # No claim — skip
+
+    # No worker evidence: use Gemini knowledge as fallback instead of returning blank
+    if not items:
+        logger.info("No worker evidence — falling back to Gemini knowledge-only verdict")
+        return _judge_from_knowledge(state.core_claim)
 
     evidence_block = _build_evidence_block(items)
     prompt = _JUDGE_PROMPT.format(
