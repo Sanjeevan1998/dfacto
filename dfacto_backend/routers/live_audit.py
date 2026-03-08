@@ -13,17 +13,25 @@ Backend → Flutter  : text  {"type":"error","message":"..."}
 
 Architecture (3-layer pipeline)
 --------------------------------
-Layer 1 — Agent 1a: WebSocket text ingestor
+
+Layer 1 — Agent 1a: WebSocket ingestor
     Receives JSON text frames from Flutter.
     Pushes (text, is_final) tuples into the Agent 1b queue.
     Stops on {"type":"stop"} or WS disconnect.
+    NOTE: isFinal=False partials are passed through so the buffer can ignore them.
 
-Layer 2 — Agent 1b (Context & Meaning Accumulator)
+Layer 2 — Agent 1b: Topic-Aware TranscriptBuffer + Segmenter
     pump_transcript() reads from the queue.
-    Maintains a ContextWindow: ALL words spoken this session are kept.
+    Accumulates ONLY isFinal=True text into TranscriptBuffer (200-word trigger).
+    When the buffer hits 200 words (or flush on stop):
+      → Calls agents.topic_segmenter.segment_topics() [Gemini 2.0 Flash]
+      → Routes TopicBlocks:
+          COMPLETED → _fact_check_and_send()  (downstream to Agent 1c)
+          ONGOING   → TranscriptBuffer.prepend_ongoing()  (carry into next cycle)
+    Session history (all isFinal words) is maintained separately for context.
 
-Layer 3 — Agent 1c → pipeline
-    classify_claim → run_pipeline_from_claim → result to Flutter.
+Layer 3 — Agent 1c → LangGraph pipeline
+    classify_claim (Agent 0) → run_pipeline_from_claim → result to Flutter.
 """
 
 from __future__ import annotations
@@ -37,91 +45,101 @@ from starlette.websockets import WebSocketState
 
 from agents.claim_classifier import classify_claim
 from agents.supervisor import run_pipeline_from_claim
+from agents.topic_segmenter import segment_topics
 
 logger = logging.getLogger("dfacto.live_audit")
 
 router = APIRouter()
 
+# Trigger a topic-segmentation cycle after this many new isFinal words in the buffer.
+BUFFER_TRIGGER_WORDS: int = 200
 
-# ── Agent 1b: Context Window (NEVER discards session words) ───────────────────
 
-class ContextWindow:
+# ── Agent 1b: TranscriptBuffer ────────────────────────────────────────────────
+
+class TranscriptBuffer:
     """
-    Accumulates ALL words spoken in the session.
-    Never removes words — uses _check_from_idx to track which words
-    are new since the last fact-check trigger.
-    """
+    Accumulates isFinal=True spoken words.
 
-    CHUNK_NEW_WORDS: int = 50   # Trigger fact-check after this many new words
-    MIN_NEW_WORDS: int = 25     # Minimum new words before firing on utterance boundary
+    - _buffer_words : words pending topic segmentation (may shrink via prepend_ongoing)
+    - _session_words: ALL words spoken this session (never shrinks — used as full context)
+    """
 
     def __init__(self) -> None:
-        self._words: list[str] = []       # Full session transcript (never shrinks)
-        self._check_from_idx: int = 0     # Index of first word not yet checked
+        self._buffer_words: list[str] = []
+        self._session_words: list[str] = []
+
+    # ── Mutators ───────────────────────────────────────────────────────────────
 
     def add(self, text: str) -> None:
-        self._words.extend(text.strip().split())
+        """Append an isFinal=True utterance to both the buffer and session history."""
+        words = text.strip().split()
+        self._buffer_words.extend(words)
+        self._session_words.extend(words)
+
+    def prepend_ongoing(self, text: str) -> None:
+        """
+        Carry-forward an ONGOING TopicBlock so the next segmentation cycle
+        begins with this text already in the buffer.
+        NOTE: these words are already in session history — do NOT re-add.
+        """
+        words = text.strip().split()
+        self._buffer_words = words + self._buffer_words
+
+    def flush(self) -> str:
+        """Return and clear the current buffer content."""
+        text = " ".join(self._buffer_words)
+        self._buffer_words = []
+        return text
+
+    # ── Queries ────────────────────────────────────────────────────────────────
 
     @property
-    def total_words(self) -> int:
-        return len(self._words)
+    def buffer_word_count(self) -> int:
+        return len(self._buffer_words)
 
     @property
-    def new_word_count(self) -> int:
-        return len(self._words) - self._check_from_idx
+    def should_trigger(self) -> bool:
+        return self.buffer_word_count >= BUFFER_TRIGGER_WORDS
 
     @property
-    def has_new_content(self) -> bool:
-        return self.new_word_count > 0
+    def has_buffer_content(self) -> bool:
+        return bool(self._buffer_words)
+
+    def session_context(self) -> str:
+        """Full session transcript — passed to classify_claim for reference resolution."""
+        return " ".join(self._session_words)
 
     @property
-    def should_check_on_count(self) -> bool:
-        return self.new_word_count >= self.CHUNK_NEW_WORDS
-
-    def ready_for_utterance_check(self) -> bool:
-        return self.new_word_count >= self.MIN_NEW_WORDS
-
-    def new_window_snapshot(self) -> str:
-        """The words added since the last check (what's new)."""
-        return " ".join(self._words[self._check_from_idx:])
-
-    def full_context_snapshot(self) -> str:
-        """The entire session transcript so far."""
-        return " ".join(self._words)
-
-    def advance_check_pointer(self) -> None:
-        """Mark all current words as checked. Words are NEVER deleted."""
-        self._check_from_idx = len(self._words)
-
-    @property
-    def has_content(self) -> bool:
-        return bool(self._words)
+    def total_session_words(self) -> int:
+        return len(self._session_words)
 
 
-# ── Layer 3: background fact-check task ───────────────────────────────────────
+# ── Layer 3: fact-check + send ────────────────────────────────────────────────
 
 async def _fact_check_and_send(
-    new_window: str,
-    full_context: str,
+    topic_text: str,
+    session_context: str,
     ws: WebSocket,
 ) -> None:
     """
-    Background coroutine: classify the new window (with full context),
-    run pipeline if a claim is found, push result to Flutter.
+    Background coroutine: classify a COMPLETED topic block, run LangGraph
+    pipeline if a checkable claim is found, push result to Flutter.
     """
-    new_window = new_window.strip()
-    if not new_window:
+    topic_text = topic_text.strip()
+    if not topic_text:
         return
 
     logger.info(
-        "Fact-check window (%d new words, %d total context): %r…",
-        len(new_window.split()),
-        len(full_context.split()),
-        new_window[:100],
+        "Fact-check dispatch — %d words: %r…",
+        len(topic_text.split()),
+        topic_text[:100],
     )
 
     try:
-        classification = await asyncio.to_thread(classify_claim, new_window, full_context)
+        classification = await asyncio.to_thread(
+            classify_claim, topic_text, session_context
+        )
     except Exception as exc:
         logger.exception("classify_claim error: %s", exc)
         return
@@ -131,13 +149,12 @@ async def _fact_check_and_send(
 
     if not (is_claim and not needs_context):
         logger.info(
-            "No actionable claim (is_claim=%s needs_context=%s) — window skipped",
-            is_claim,
-            needs_context,
+            "No actionable claim (is_claim=%s needs_context=%s) — skipped",
+            is_claim, needs_context,
         )
         return
 
-    claim = classification.get("extracted_claim", "").strip() or new_window
+    claim = classification.get("extracted_claim", "").strip() or topic_text
     logger.info("Claim extracted — running pipeline: %r", claim[:100])
 
     try:
@@ -159,27 +176,61 @@ async def _fact_check_and_send(
             pass
 
 
-# ── Agent 1b: Context Accumulator + fire-and-forget trigger ───────────────────
+# ── Layer 2: Agent 1b — topic-aware pump ──────────────────────────────────────
 
-async def _pump_transcript(
-    queue: asyncio.Queue[tuple[str, bool] | None],
-    context: ContextWindow,
+async def _run_segmentation_cycle(
+    chunk: str,
+    buffer: TranscriptBuffer,
     websocket: WebSocket,
     pending_tasks: set[asyncio.Task],
 ) -> None:
-    """Agent 1b — reads queue, builds the ContextWindow, fires fact-check tasks."""
+    """
+    Single segmentation cycle:
+    1. Call Gemini 2.0 Flash topic segmenter.
+    2. Route each block:
+       - COMPLETED → fire-and-forget fact-check task
+       - ONGOING   → prepend back into the buffer
+    """
+    session_ctx = buffer.session_context()
 
-    def _fire_check() -> None:
-        new_window = context.new_window_snapshot()
-        full_ctx = context.full_context_snapshot()
-        if not new_window.strip():
-            return
-        context.advance_check_pointer()
-        task = asyncio.create_task(
-            _fact_check_and_send(new_window, full_ctx, websocket)
-        )
-        pending_tasks.add(task)
-        task.add_done_callback(pending_tasks.discard)
+    try:
+        blocks = await asyncio.to_thread(segment_topics, chunk, session_ctx)
+    except Exception as exc:
+        logger.exception("segment_topics error — treating chunk as COMPLETED: %s", exc)
+        # Zero-crash fallback: treat entire chunk as a single COMPLETED block
+        from agents.topic_segmenter import TopicBlock
+        blocks = [TopicBlock(topic_label="unknown", text=chunk, status="COMPLETED")]
+
+    ongoing_count = sum(1 for b in blocks if not b.is_completed)
+    completed_count = len(blocks) - ongoing_count
+    logger.info(
+        "Segmentation result: %d block(s) — %d COMPLETED, %d ONGOING",
+        len(blocks), completed_count, ongoing_count,
+    )
+
+    for block in blocks:
+        if block.is_completed:
+            task = asyncio.create_task(
+                _fact_check_and_send(block.text, session_ctx, websocket)
+            )
+            pending_tasks.add(task)
+            task.add_done_callback(pending_tasks.discard)
+        else:
+            # ONGOING — carry text forward into next 200-word cycle
+            logger.info(
+                "ONGOING topic %r (%d words) — prepending to buffer",
+                block.topic_label, block.word_count,
+            )
+            buffer.prepend_ongoing(block.text)
+
+
+async def _pump_transcript(
+    queue: asyncio.Queue[tuple[str, bool] | None],
+    buffer: TranscriptBuffer,
+    websocket: WebSocket,
+    pending_tasks: set[asyncio.Task],
+) -> None:
+    """Agent 1b — reads the queue, maintains TranscriptBuffer, triggers segmentation."""
 
     while True:
         item = await queue.get()
@@ -188,29 +239,35 @@ async def _pump_transcript(
             break
 
         text, is_final = item
-        context.add(text)
 
-        if context.should_check_on_count:
-            logger.info(
-                "Word-count trigger (%d new words) — firing fact-check",
-                context.new_word_count,
+        # Only isFinal=True utterances go into the buffer — partials are noise
+        if is_final and text.strip():
+            buffer.add(text)
+            logger.debug(
+                "Buffer +%d words (total buffer: %d, session: %d)",
+                len(text.split()), buffer.buffer_word_count, buffer.total_session_words,
             )
-            _fire_check()
 
-        elif is_final and context.ready_for_utterance_check():
+        # Trigger segmentation when buffer reaches 200 words
+        if buffer.should_trigger:
+            chunk = buffer.flush()
             logger.info(
-                "Utterance boundary (%d new words) — firing fact-check",
-                context.new_word_count,
+                "Buffer trigger (%d words) — running topic segmentation",
+                len(chunk.split()),
             )
-            _fire_check()
+            await _run_segmentation_cycle(chunk, buffer, websocket, pending_tasks)
 
-    # Final flush after stop
-    if context.has_new_content:
-        logger.info("Final flush: %d new words", context.new_word_count)
-        _fire_check()
+    # ── Final flush on stop signal ────────────────────────────────────────────
+    if buffer.has_buffer_content:
+        chunk = buffer.flush()
+        logger.info(
+            "Final flush on stop (%d words) — running topic segmentation",
+            len(chunk.split()),
+        )
+        await _run_segmentation_cycle(chunk, buffer, websocket, pending_tasks)
 
 
-# ── Layer 1: WebSocket text ingestor ──────────────────────────────────────────
+# ── Layer 1: WebSocket ingestor ───────────────────────────────────────────────
 
 async def _ingest_ws(
     websocket: WebSocket,
@@ -218,7 +275,8 @@ async def _ingest_ws(
 ) -> None:
     """
     Agent 1a — reads JSON text frames from Flutter WebSocket.
-    Pushes (text, is_final) tuples into Layer 2 queue.
+    Pushes (text, is_final) tuples → queue (both partials and finals).
+    Sends sentinel None on stop or disconnect.
     """
     try:
         while True:
@@ -234,7 +292,10 @@ async def _ingest_ws(
                 text = msg.get("text", "").strip()
                 is_final = bool(msg.get("isFinal", True))
                 if text:
-                    logger.debug("Transcript chunk (final=%s): %r", is_final, text[:80])
+                    logger.debug(
+                        "Ingest (final=%s, %d words): %r",
+                        is_final, len(text.split()), text[:60],
+                    )
                     await queue.put((text, is_final))
 
     except WebSocketDisconnect:
@@ -245,7 +306,7 @@ async def _ingest_ws(
         await queue.put(None)  # sentinel
 
 
-# ── WebSocket handler ──────────────────────────────────────────────────────────
+# ── WebSocket handler ─────────────────────────────────────────────────────────
 
 @router.websocket("/ws/live-audit")
 async def live_audit_ws(websocket: WebSocket):
@@ -253,13 +314,13 @@ async def live_audit_ws(websocket: WebSocket):
     logger.info("Live Audit WS connected")
 
     queue: asyncio.Queue[tuple[str, bool] | None] = asyncio.Queue()
-    context = ContextWindow()
+    buffer = TranscriptBuffer()
     pending_tasks: set[asyncio.Task] = set()
 
     try:
         await asyncio.gather(
             _ingest_ws(websocket, queue),
-            _pump_transcript(queue, context, websocket, pending_tasks),
+            _pump_transcript(queue, buffer, websocket, pending_tasks),
         )
     except Exception as exc:
         logger.exception("Live Audit pipeline error: %s", exc)
@@ -286,6 +347,7 @@ async def live_audit_ws(websocket: WebSocket):
             task.cancel()
 
         logger.info(
-            "Live Audit WS session ended — total words captured: %d",
-            context.total_words,
+            "Live Audit WS session ended — total session words: %d, buffer trigger: %d words",
+            buffer.total_session_words,
+            BUFFER_TRIGGER_WORDS,
         )
