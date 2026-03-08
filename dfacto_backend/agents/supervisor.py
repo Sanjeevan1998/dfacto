@@ -131,6 +131,13 @@ def node_fan_out(state: GraphState) -> dict:
     # Use the pre-compressed search query (generated once in node_categorize)
     q = state.search_query or claim[:120]
 
+    def _safe(future, name: str) -> list:
+        try:
+            return future.result()
+        except Exception as exc:
+            logger.warning("Worker %s failed — skipping: %s", name, exc)
+            return []
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         future_web = executor.submit(search_web, claim, q)
         future_trusted = executor.submit(search_trusted_dbs, claim, q)
@@ -138,11 +145,11 @@ def node_fan_out(state: GraphState) -> dict:
         future_multimodal = executor.submit(analyze_multimodal, claim, q)
         future_news = executor.submit(search_news, claim, q)
 
-        web_results = future_web.result()
-        trusted_results = future_trusted.result()
-        social_results = future_social.result()
-        multimodal_results = future_multimodal.result()
-        news_results = future_news.result()
+        web_results = _safe(future_web, "web")
+        trusted_results = _safe(future_trusted, "trusted")
+        social_results = _safe(future_social, "social")
+        multimodal_results = _safe(future_multimodal, "multimodal")
+        news_results = _safe(future_news, "news")
 
     all_results = web_results + trusted_results + social_results + multimodal_results + news_results
     logger.info(

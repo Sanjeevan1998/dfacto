@@ -22,7 +22,7 @@ logger = logging.getLogger("dfacto.worker_social")
 
 _REDDIT_SUBREDDITS = ["news", "worldnews", "factcheck", "politics"]
 _REDDIT_HEADERS = {"User-Agent": "dfacto-factchecker/1.0 (research tool)"}
-_REQUEST_TIMEOUT = 6
+_REQUEST_TIMEOUT = 4
 
 _FALSE_HINTS = {
     "false", "debunked", "misinformation", "misleading", "hoax",
@@ -62,7 +62,7 @@ def _reddit_search(claim: str, subreddit: str) -> list[dict]:
             data = json.loads(resp.read().decode())
         posts = data.get("data", {}).get("children", [])
         return [p["data"] for p in posts if p.get("kind") == "t3"]
-    except (urllib.error.URLError, json.JSONDecodeError, KeyError) as exc:
+    except Exception as exc:
         logger.debug("Reddit search failed for r/%s: %s", subreddit, exc)
         return []
 

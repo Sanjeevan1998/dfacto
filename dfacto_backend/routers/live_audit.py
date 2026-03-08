@@ -186,10 +186,21 @@ async def _fact_check_and_send(
         history.add(claim)
         logger.info("Claim → pipeline: %r", claim[:100])
 
+        # Immediately notify Flutter that this claim is being checked
+        try:
+            await ws.send_text(json.dumps({"type": "checking", "claimText": claim}))
+        except Exception:
+            pass
+
         try:
             result = await asyncio.to_thread(run_pipeline_from_claim, claim)
         except Exception as exc:
             logger.exception("run_pipeline_from_claim error: %s", exc)
+            # Notify Flutter the check failed
+            try:
+                await ws.send_text(json.dumps({"type": "checking_failed", "claimText": claim}))
+            except Exception:
+                pass
             continue
 
         if result:
