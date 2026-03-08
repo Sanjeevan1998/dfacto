@@ -61,7 +61,11 @@ class SpeechRecognitionPlugin(
     // ── EventChannel.StreamHandler ────────────────────────────────────────────
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
+        recognitionJob?.cancel()
+        recognitionJob = null
         scope.launch {
+            try { recognizer?.stopRecognition(); recognizer?.close() } catch (_: Exception) {}
+            recognizer = null
             tryStartWithMode(SpeechRecognizerOptions.Mode.MODE_ADVANCED, events)
         }
     }
@@ -82,6 +86,10 @@ class SpeechRecognitionPlugin(
         mode: Int,
         events: EventChannel.EventSink
     ) {
+        // Always close previous recognizer to prevent ManagedChannel leaks
+        try { recognizer?.stopRecognition(); recognizer?.close() } catch (_: Exception) {}
+        recognizer = null
+
         val opts: SpeechRecognizerOptions = speechRecognizerOptions {
             locale = Locale.US
             preferredMode = mode
