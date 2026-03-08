@@ -38,21 +38,24 @@ _SYSTEM_PROMPT = """You are a claim classifier for a real-time fact-checking sys
 {
   "is_claim": <true if it contains a verifiable factual claim, false if it's opinion/filler/question/greeting>,
   "needs_context": <true if the phrase references something unclear EVEN WITH the prior context provided>,
-  "extracted_claim": "<the core claim as a fully self-contained standalone declarative sentence, or empty string if not a claim>"
+  "extracted_claim": "<the core claim as a fully self-contained standalone declarative sentence, or empty string if not a claim>",
+  "is_duplicate": <true if extracted_claim is semantically identical or a direct paraphrase of any claim in the recent_claims list, false otherwise>
 }
 
 Rules:
 - Use the prior session context to resolve referential phrases like "that caused cancer" or "he said it happened".
 - If the prior context resolves what 'that'/'it'/'he' refers to, set needs_context=false and write a fully resolved extracted_claim.
 - extracted_claim must be understandable without any surrounding context — it must name subjects explicitly.
+- CONSOLIDATION RULE: If the new phrase contains multiple statements that mean the same thing (e.g. "Vaccines cause autism" and "There is a proven link between shots and autism"), merge them into ONE single canonical extracted_claim. Never output more than one claim.
+- DUPLICATE RULE: Compare extracted_claim against the recent_claims list (if provided). Set is_duplicate=true if the new claim is semantically identical or a direct paraphrase of any recent claim — even if worded differently. Set is_duplicate=false if no recent_claims are provided or the claim is genuinely new.
 
 Examples:
-"The Earth is flat" → {"is_claim": true, "needs_context": false, "extracted_claim": "The Earth is flat"}
-"Vaccines cause autism" → {"is_claim": true, "needs_context": false, "extracted_claim": "Vaccines cause autism"}
-"That happened in 2020" (no prior context) → {"is_claim": false, "needs_context": true, "extracted_claim": ""}
-"Yeah that's interesting" → {"is_claim": false, "needs_context": false, "extracted_claim": ""}
-"So anyway" → {"is_claim": false, "needs_context": false, "extracted_claim": ""}
-"Neil Armstrong was the first to walk on the Moon in 1969" → {"is_claim": true, "needs_context": false, "extracted_claim": "Neil Armstrong was the first person to walk on the Moon in 1969"}
+"The Earth is flat" → {"is_claim": true, "needs_context": false, "extracted_claim": "The Earth is flat", "is_duplicate": false}
+"Vaccines cause autism" → {"is_claim": true, "needs_context": false, "extracted_claim": "Vaccines cause autism", "is_duplicate": false}
+"That happened in 2020" (no prior context) → {"is_claim": false, "needs_context": true, "extracted_claim": "", "is_duplicate": false}
+"Yeah that's interesting" → {"is_claim": false, "needs_context": false, "extracted_claim": "", "is_duplicate": false}
+"So anyway" → {"is_claim": false, "needs_context": false, "extracted_claim": "", "is_duplicate": false}
+"Neil Armstrong was the first to walk on the Moon in 1969" → {"is_claim": true, "needs_context": false, "extracted_claim": "Neil Armstrong was the first person to walk on the Moon in 1969", "is_duplicate": false}
 """
 
 # Filler patterns for keyword fallback
@@ -71,28 +74,36 @@ _CONTEXT_PATTERNS = re.compile(
 )
 
 
-def classify_claim(text: str, full_context: str = "") -> dict:
+def classify_claim(
+    text: str,
+    full_context: str = "",
+    recent_claims: list[str] | None = None,
+) -> dict:
     """
     Args:
         text: The new spoken window to classify (words since last check).
         full_context: The full session transcript so far (all words spoken).
                       Passed to Gemini so referential phrases can be resolved.
+        recent_claims: Up to 10 canonical claims already sent to the pipeline
+                       this session. Gemini uses these to detect duplicates/
+                       paraphrases within a single call — no extra API round-trip.
 
     Returns:
         {
           "is_claim": bool,
           "needs_context": bool,
           "extracted_claim": str,
+          "is_duplicate": bool,
           "source": "gemini" | "heuristic"
         }
     """
     text = text.strip()
     if not text or len(text.split()) < 2:
-        return {"is_claim": False, "needs_context": False, "extracted_claim": "", "source": "heuristic"}
+        return {"is_claim": False, "needs_context": False, "extracted_claim": "", "is_duplicate": False, "source": "heuristic"}
 
     # Fast heuristic check for obvious filler
     if _FILLER_PATTERNS.match(text):
-        return {"is_claim": False, "needs_context": False, "extracted_claim": "", "source": "heuristic"}
+        return {"is_claim": False, "needs_context": False, "extracted_claim": "", "is_duplicate": False, "source": "heuristic"}
 
     try:
         client = _get_client()
@@ -101,13 +112,17 @@ def classify_claim(text: str, full_context: str = "") -> dict:
             if full_context.strip()
             else ""
         )
-        prompt = f'{_SYSTEM_PROMPT}{context_section}\nNew phrase to classify: "{text}"'
+        recent_section = ""
+        if recent_claims:
+            numbered = "\n".join(f"  {i+1}. {c}" for i, c in enumerate(recent_claims))
+            recent_section = f"\n\nRecent already-checked claims (use for is_duplicate check):\n{numbered}\n"
+        prompt = f'{_SYSTEM_PROMPT}{context_section}{recent_section}\nNew phrase to classify: "{text}"'
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
             config=genai_types.GenerateContentConfig(
                 temperature=0.1,
-                max_output_tokens=180,
+                max_output_tokens=200,
                 thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
             ),
         )
@@ -116,11 +131,13 @@ def classify_claim(text: str, full_context: str = "") -> dict:
         if s != -1 and e != -1:
             raw = raw[s : e + 1]
         result = json.loads(raw)
+        result.setdefault("is_duplicate", False)
         result["source"] = "gemini"
         logger.info(
-            "classify_claim: is_claim=%s needs_context=%s claim=%r",
+            "classify_claim: is_claim=%s needs_context=%s is_duplicate=%s claim=%r",
             result.get("is_claim"),
             result.get("needs_context"),
+            result.get("is_duplicate"),
             result.get("extracted_claim", "")[:60],
         )
         return result
@@ -134,5 +151,6 @@ def classify_claim(text: str, full_context: str = "") -> dict:
             "is_claim": is_claim,
             "needs_context": needs_ctx,
             "extracted_claim": text if is_claim else "",
+            "is_duplicate": False,  # heuristic path cannot detect semantic duplicates
             "source": "heuristic",
         }

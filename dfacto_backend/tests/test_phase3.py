@@ -372,55 +372,89 @@ class TestVeracityMap:
         assert self._format("UNKNOWN")["claimVeracity"] == "unknown"
 
 
-# ── ContextWindow: never-discard invariant ────────────────────────────────────
+# ── TranscriptBuffer: session history invariant ───────────────────────────────
 
-class TestContextWindow:
-    def test_words_are_never_deleted(self):
-        from routers.live_audit import ContextWindow
-        cw = ContextWindow()
-        cw.add("hello world")
-        cw.advance_check_pointer()
-        cw.add("new words added")
-        # Full context still contains all words
-        assert "hello" in cw.full_context_snapshot()
-        assert "new" in cw.full_context_snapshot()
+class TestTranscriptBuffer:
+    def test_session_history_never_shrinks_after_flush(self):
+        from routers.live_audit import TranscriptBuffer
+        buf = TranscriptBuffer()
+        buf.add("hello world")
+        buf.flush()
+        buf.add("new words added")
+        # Session context retains all words across flushes
+        ctx = buf.session_context()
+        assert "hello" in ctx
+        assert "new" in ctx
 
-    def test_new_window_only_shows_post_pointer_words(self):
-        from routers.live_audit import ContextWindow
-        cw = ContextWindow()
-        cw.add("first batch of words")
-        cw.advance_check_pointer()
-        cw.add("second batch of words")
-        assert "first" not in cw.new_window_snapshot()
-        assert "second" in cw.new_window_snapshot()
+    def test_flush_clears_buffer_but_not_session(self):
+        from routers.live_audit import TranscriptBuffer
+        buf = TranscriptBuffer()
+        buf.add("first batch of words")  # 4 words
+        flushed = buf.flush()
+        assert "first" in flushed
+        assert buf.buffer_word_count == 0
+        assert buf.total_session_words == 4  # session unchanged
 
-    def test_advance_pointer_tracks_total_words(self):
-        from routers.live_audit import ContextWindow
-        cw = ContextWindow()
-        cw.add("one two three four five")  # 5 words
-        assert cw.new_word_count == 5
-        cw.advance_check_pointer()
-        assert cw.new_word_count == 0
-        cw.add("six seven")
-        assert cw.new_word_count == 2
-        assert cw.total_words == 7  # All words still counted
+    def test_buffer_word_count_tracks_adds(self):
+        from routers.live_audit import TranscriptBuffer
+        buf = TranscriptBuffer()
+        buf.add("one two three four five")
+        assert buf.buffer_word_count == 5
+        buf.flush()
+        assert buf.buffer_word_count == 0
+        buf.add("six seven")
+        assert buf.buffer_word_count == 2
+        assert buf.total_session_words == 7
 
-    def test_should_check_on_count_fires_at_threshold(self):
-        from routers.live_audit import ContextWindow
-        cw = ContextWindow()
-        # CHUNK_NEW_WORDS = 30; add 30 words
-        cw.add(" ".join(["word"] * 30))
-        assert cw.should_check_on_count is True
+    def test_should_trigger_fires_at_200_words(self):
+        from routers.live_audit import TranscriptBuffer
+        buf = TranscriptBuffer()
+        buf.add(" ".join(["word"] * 200))
+        assert buf.should_trigger is True
 
-    def test_below_threshold_does_not_fire(self):
-        from routers.live_audit import ContextWindow
-        cw = ContextWindow()
-        cw.add(" ".join(["word"] * 5))
-        assert cw.should_check_on_count is False
+    def test_below_200_words_does_not_trigger(self):
+        from routers.live_audit import TranscriptBuffer
+        buf = TranscriptBuffer()
+        buf.add(" ".join(["word"] * 50))
+        assert buf.should_trigger is False
 
-    def test_has_content_false_when_empty(self):
-        from routers.live_audit import ContextWindow
-        cw = ContextWindow()
-        assert cw.has_content is False
-        cw.add("something")
-        assert cw.has_content is True
+    def test_has_buffer_content_false_when_empty(self):
+        from routers.live_audit import TranscriptBuffer
+        buf = TranscriptBuffer()
+        assert buf.has_buffer_content is False
+        buf.add("something")
+        assert buf.has_buffer_content is True
+
+
+# ── ClaimHistory: rolling deduplication cache ─────────────────────────────────
+
+class TestClaimHistory:
+    def test_recent_returns_added_claims(self):
+        from routers.live_audit import ClaimHistory
+        h = ClaimHistory()
+        h.add("Vaccines cause autism")
+        h.add("The Earth is flat")
+        assert h.recent() == ["Vaccines cause autism", "The Earth is flat"]
+
+    def test_evicts_oldest_when_over_max_size(self):
+        from routers.live_audit import ClaimHistory
+        h = ClaimHistory()
+        for i in range(11):
+            h.add(f"claim {i}")
+        recent = h.recent()
+        assert len(recent) == 10
+        assert "claim 0" not in recent   # evicted
+        assert "claim 10" in recent
+
+    def test_empty_history_returns_empty_list(self):
+        from routers.live_audit import ClaimHistory
+        h = ClaimHistory()
+        assert h.recent() == []
+
+    def test_recent_returns_copy_not_reference(self):
+        from routers.live_audit import ClaimHistory
+        h = ClaimHistory()
+        h.add("original claim")
+        snapshot = h.recent()
+        snapshot.append("injected")
+        assert len(h.recent()) == 1  # internal list unaffected

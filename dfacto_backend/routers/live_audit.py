@@ -55,6 +55,29 @@ router = APIRouter()
 BUFFER_TRIGGER_WORDS: int = 200
 
 
+# ── Rolling Claim History (session-scoped deduplication cache) ────────────────
+
+class ClaimHistory:
+    """
+    Tracks the last N canonical claims dispatched to the LangGraph pipeline
+    this session. Passed to classify_claim() so Gemini can detect semantic
+    duplicates/paraphrases within the same API call — no extra round-trip.
+    """
+
+    MAX_SIZE: int = 10
+
+    def __init__(self) -> None:
+        self._claims: list[str] = []
+
+    def recent(self) -> list[str]:
+        return list(self._claims)
+
+    def add(self, claim: str) -> None:
+        self._claims.append(claim)
+        if len(self._claims) > self.MAX_SIZE:
+            self._claims.pop(0)
+
+
 # ── Agent 1b: TranscriptBuffer ────────────────────────────────────────────────
 
 class TranscriptBuffer:
@@ -121,10 +144,11 @@ async def _fact_check_and_send(
     topic_text: str,
     session_context: str,
     ws: WebSocket,
+    history: ClaimHistory,
 ) -> None:
     """
     Background coroutine: classify a COMPLETED topic block, run LangGraph
-    pipeline if a checkable claim is found, push result to Flutter.
+    pipeline if a checkable, non-duplicate claim is found, push result to Flutter.
     """
     topic_text = topic_text.strip()
     if not topic_text:
@@ -138,7 +162,7 @@ async def _fact_check_and_send(
 
     try:
         classification = await asyncio.to_thread(
-            classify_claim, topic_text, session_context
+            classify_claim, topic_text, session_context, history.recent()
         )
     except Exception as exc:
         logger.exception("classify_claim error: %s", exc)
@@ -154,7 +178,15 @@ async def _fact_check_and_send(
         )
         return
 
+    if classification.get("is_duplicate", False):
+        logger.info(
+            "Duplicate claim — silently discarded: %r",
+            classification.get("extracted_claim", topic_text)[:100],
+        )
+        return
+
     claim = classification.get("extracted_claim", "").strip() or topic_text
+    history.add(claim)
     logger.info("Claim extracted — running pipeline: %r", claim[:100])
 
     try:
@@ -183,6 +215,7 @@ async def _run_segmentation_cycle(
     buffer: TranscriptBuffer,
     websocket: WebSocket,
     pending_tasks: set[asyncio.Task],
+    history: ClaimHistory,
 ) -> None:
     """
     Single segmentation cycle:
@@ -211,7 +244,7 @@ async def _run_segmentation_cycle(
     for block in blocks:
         if block.is_completed:
             task = asyncio.create_task(
-                _fact_check_and_send(block.text, session_ctx, websocket)
+                _fact_check_and_send(block.text, session_ctx, websocket, history)
             )
             pending_tasks.add(task)
             task.add_done_callback(pending_tasks.discard)
@@ -229,6 +262,7 @@ async def _pump_transcript(
     buffer: TranscriptBuffer,
     websocket: WebSocket,
     pending_tasks: set[asyncio.Task],
+    history: ClaimHistory,
 ) -> None:
     """Agent 1b — reads the queue, maintains TranscriptBuffer, triggers segmentation."""
 
@@ -255,7 +289,7 @@ async def _pump_transcript(
                 "Buffer trigger (%d words) — running topic segmentation",
                 len(chunk.split()),
             )
-            await _run_segmentation_cycle(chunk, buffer, websocket, pending_tasks)
+            await _run_segmentation_cycle(chunk, buffer, websocket, pending_tasks, history)
 
     # ── Final flush on stop signal ────────────────────────────────────────────
     if buffer.has_buffer_content:
@@ -264,7 +298,7 @@ async def _pump_transcript(
             "Final flush on stop (%d words) — running topic segmentation",
             len(chunk.split()),
         )
-        await _run_segmentation_cycle(chunk, buffer, websocket, pending_tasks)
+        await _run_segmentation_cycle(chunk, buffer, websocket, pending_tasks, history)
 
 
 # ── Layer 1: WebSocket ingestor ───────────────────────────────────────────────
@@ -315,12 +349,13 @@ async def live_audit_ws(websocket: WebSocket):
 
     queue: asyncio.Queue[tuple[str, bool] | None] = asyncio.Queue()
     buffer = TranscriptBuffer()
+    history = ClaimHistory()
     pending_tasks: set[asyncio.Task] = set()
 
     try:
         await asyncio.gather(
             _ingest_ws(websocket, queue),
-            _pump_transcript(queue, buffer, websocket, pending_tasks),
+            _pump_transcript(queue, buffer, websocket, pending_tasks, history),
         )
     except Exception as exc:
         logger.exception("Live Audit pipeline error: %s", exc)
