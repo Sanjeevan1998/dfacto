@@ -155,3 +155,82 @@ Transcript:
     results = await asyncio.gather(*tasks)
     valid = [r for r in results if r is not None]
     return {"claims": valid}
+
+
+# ── Follow-up Q&A endpoint ───────────────────────────────────────────────────
+
+class FollowupRequest(BaseModel):
+    claim: str       # The original fact-checked claim
+    question: str    # User's follow-up question
+    context: str = ""  # Optional: verdict/summary for richer answers
+
+
+@router.post("/followup")
+async def debug_followup(body: FollowupRequest):
+    """
+    Answer a follow-up question about a fact-checked claim.
+    Uses Tavily web search + Gemini to synthesize a short, direct answer.
+
+    Example:
+        curl -X POST http://localhost:8000/debug/followup \\
+             -H 'Content-Type: application/json' \\
+             -d '{"claim": "Vaccines cause autism", "question": "What does the CDC say?"}'
+    """
+    import asyncio
+    import os
+    from google import genai
+    from google.genai import types as genai_types
+    from agents.worker_web import search_web
+
+    question = body.question.strip()
+    claim = body.claim.strip()
+    if not question or not claim:
+        return {"answer": ""}
+
+    logger.info("Follow-up question for claim %r: %r", claim[:80], question[:80])
+
+    # Search for relevant evidence using the question as the query
+    search_q = f"{claim[:60]} {question[:60]}"
+    try:
+        evidence = await asyncio.to_thread(search_web, claim, search_q, max_results=4)
+    except Exception:
+        evidence = []
+
+    # Build evidence context
+    excerpts = "\n".join(
+        f"- [{e.get('source','')}] {e.get('excerpt','')}"
+        for e in evidence[:4]
+    ) if evidence else "No additional sources found."
+
+    # Ask Gemini to synthesize a focused answer
+    prompt = f"""You are a fact-check assistant. Answer the follow-up question below concisely (2-4 sentences max).
+Use the provided evidence and original claim context. Be direct and cite sources where relevant.
+
+Original claim: "{claim}"
+{f'Fact-check context: {body.context}' if body.context else ''}
+
+Follow-up question: "{question}"
+
+Evidence from web search:
+{excerpts}
+
+Answer (plain text only, no markdown, 2-4 sentences):"""
+
+    try:
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=200,
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        answer = response.text.strip()
+    except Exception as exc:
+        logger.warning("Follow-up Gemini error: %s", exc)
+        answer = "Unable to retrieve an answer at this time."
+
+    logger.info("Follow-up answer: %r", answer[:100])
+    return {"answer": answer}

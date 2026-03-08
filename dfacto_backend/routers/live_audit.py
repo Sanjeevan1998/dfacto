@@ -52,7 +52,7 @@ logger = logging.getLogger("dfacto.live_audit")
 router = APIRouter()
 
 # Trigger a topic-segmentation cycle after this many new isFinal words in the buffer.
-BUFFER_TRIGGER_WORDS: int = 200
+BUFFER_TRIGGER_WORDS: int = 100
 
 
 # ── Rolling Claim History (session-scoped deduplication cache) ────────────────
