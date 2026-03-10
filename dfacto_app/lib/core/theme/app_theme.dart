@@ -29,11 +29,21 @@ class DfactoColors {
   static const Color lightAccent        = Color(0xFF000000); // black accent
   static const Color lightAccentSoft    = Color(0x14000000); // black glow
 
-  // ── Semantic Verdict Colors (kept for meaning, desaturated) ────────────────
-  static const Color verdictTrue    = Color(0xFF4CAF50); // green (kept semantic)
-  static const Color verdictFalse   = Color(0xFFF44336); // red  (kept semantic)
-  static const Color verdictMixed   = Color(0xFFFF9800); // amber (kept semantic)
+  // ── Semantic Verdict Colors (matching UI/UX prototype) ────────────────────
+  static const Color verdictTrue    = Color(0xFF48D67B); // prototype green
+  static const Color verdictFalse   = Color(0xFFFF5353); // prototype red
+  static const Color verdictMixed   = Color(0xFFFFCC52); // prototype yellow
   static const Color verdictUnknown = Color(0xFF9E9E9E); // gray
+}
+
+// ─── Glass Morphism Colors ────────────────────────────────────────────────────
+class GlassColors {
+  GlassColors._();
+  static const Color surface      = Color(0x38FFFFFF); // rgba(255,255,255,0.22)
+  static const Color surfaceHeavy = Color(0x8CFFFFFF); // rgba(255,255,255,0.55)
+  static const Color border       = Color(0x14FFFFFF); // rgba(255,255,255,0.08)
+  static const Color navBg        = Color(0x1FFFFFFF); // rgba(255,255,255,0.12)
+  static const Color navBorder    = Color(0x4DFFFFFF); // rgba(255,255,255,0.30)
 }
 
 // ─── Context-Aware Color Extensions ──────────────────────────────────────────

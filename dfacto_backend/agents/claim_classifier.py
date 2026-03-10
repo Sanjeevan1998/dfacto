@@ -42,6 +42,8 @@ _SYSTEM_PROMPT = """You are a claim classifier for a real-time fact-checking sys
   "is_duplicate": <true if extracted_claim is semantically identical or a direct paraphrase of any claim in the recent_claims list, false otherwise>
 }
 
+STEP 1 — NORMALIZE FIRST: Before evaluating, mentally strip all conversational filler (Hmm, I think, Maybe, like, you know, so, well, actually, basically, I mean, I guess, kind of, sort of, right, you see) and attempt to rephrase the remaining content as a clean declarative statement. Only after normalizing should you decide whether a verifiable claim exists. A rhetorical question like "Does that mean vaccines cause autism?" should be rephrased as the implicit assertion "Vaccines cause autism" and then evaluated.
+
 Rules:
 - Use the prior session context to resolve referential phrases like "that caused cancer" or "he said it happened".
 - If the prior context resolves what 'that'/'it'/'he' refers to, set needs_context=false and write a fully resolved extracted_claim.
@@ -53,6 +55,8 @@ Rules:
 Examples:
 "The Earth is flat" → {"is_claim": true, "needs_context": false, "extracted_claim": "The Earth is flat", "is_duplicate": false}
 "Vaccines cause autism" → {"is_claim": true, "needs_context": false, "extracted_claim": "Vaccines cause autism", "is_duplicate": false}
+"Does it mean I am a cannibal?" (prior context: discussing a study on eating disorders) → {"is_claim": false, "needs_context": false, "extracted_claim": "", "is_duplicate": false}
+"I think, like, maybe the Earth is, you know, flat?" → normalize to "The Earth is flat" → {"is_claim": true, "needs_context": false, "extracted_claim": "The Earth is flat", "is_duplicate": false}
 "That happened in 2020" (no prior context) → {"is_claim": false, "needs_context": true, "extracted_claim": "", "is_duplicate": false}
 "Yeah that's interesting" → {"is_claim": false, "needs_context": false, "extracted_claim": "", "is_duplicate": false}
 "So anyway" → {"is_claim": false, "needs_context": false, "extracted_claim": "", "is_duplicate": false}
@@ -164,14 +168,16 @@ Respond ONLY with a JSON array — each element is an object with two keys:
   "claim": "<standalone declarative sentence, 10-30 words, fully self-contained>",
   "is_duplicate": <true if this claim is semantically identical or a direct paraphrase of any claim in the recent_claims list, false otherwise>
 
+STEP 1 — NORMALIZE FIRST: Before extracting, mentally strip all conversational filler (Hmm, I think, Maybe, like, you know, so, well, actually, basically, I mean, I guess, kind of, sort of, right) from the text and rephrase fragmented thoughts into clean declarative statements. Apply this normalization before deciding what counts as a verifiable claim. Mid-sentence corrections and rhetorical questions should be interpreted as their underlying factual assertion (e.g. "Does eating meat make you a cannibal? I don't think so but..." → skip as rhetorical; "So if vaccines caused, I mean, vaccines DO cause autism right?" → extract "Vaccines cause autism").
+
 Rules:
 - Extract EVERY distinct verifiable fact (named people, numbers, locations, events, statistics).
 - Do NOT merge unrelated facts into one — keep them separate.
 - Each claim must be understandable without surrounding context — name subjects explicitly.
 - Resolve pronouns using the prior session context if provided.
 - Keep each claim SHORT (10-30 words, hard limit 40 words).
-- Conversational filler, opinions, questions, greetings → do not extract.
-- If no verifiable claims exist, return an empty array: []
+- Conversational filler, pure opinions, greetings → do not extract.
+- If no verifiable claims exist after normalization, return an empty array: []
 
 Examples of good extraction from "Seven tornadoes hit Texas. Two people, Jody Owens and her daughter Lexi, died when their car was swept away":
 [

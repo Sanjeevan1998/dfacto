@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DFacto - Video</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet"
+  >
+  <link
+    rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,500,0,0"
+  >
+  <link rel="stylesheet" href="styles.css">
+
+  <style>
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      min-height: 100%;
+      font-family: "Inter", sans-serif;
+      background: #e8edf5;
+      color: white;
+    }
+
+    body {
+      min-height: 100vh;
+    }
+
+    button,
+    input,
+    a,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      border: none;
+    }
+
+    a {
+      text-decoration: none;
+      color: inherit;
+    }
+
+    .app-shell {
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 28px 16px;
+    }
+
+    .phone {
+      width: 390px;
+      max-width: 100%;
+      height: 844px;
+      background: #000;
+      border-radius: 34px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow:
+        0 30px 90px rgba(0, 0, 0, 0.45),
+        inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      position: relative;
+      overflow: hidden;
+      backdrop-filter: blur(16px);
+    }
+
+    .page {
+      position: absolute;
+      inset: 0;
+    }
+
+    .screen-inner {
+      height: 100%;
+      overflow-y: auto;
+      padding: 22px 20px 128px;
+      scrollbar-width: none;
+    }
+
+    .screen-inner::-webkit-scrollbar {
+      width: 0;
+      height: 0;
+    }
+
+    .video-page {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      min-height: 100%;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      padding-bottom: 8px;
+      background: transparent;
+    }
+
+    .topbar-title {
+      margin: 0;
+      font-size: 1.85rem;
+      line-height: 1;
+      letter-spacing: -0.03em;
+      color: white;
+      font-weight: 700;
+    }
+
+    .topbar-actions-pill {
+      margin-left: auto;
+      height: 44px;
+      display: inline-flex;
+      align-items: center;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.22);
+      backdrop-filter: blur(16px) saturate(160%);
+      -webkit-backdrop-filter: blur(16px) saturate(160%);
+      box-shadow:
+        inset 0 1px 1px rgba(255, 255, 255, 0.55),
+        0 8px 24px rgba(31, 35, 43, 0.1);
+    }
+
+    .glass-pill-btn {
+      width: 40px;
+      height: 40px;
+      background: transparent;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      cursor: pointer;
+      transition:
+        transform 0.24s cubic-bezier(.22, 1, .36, 1),
+        background 0.24s ease;
+    }
+
+    .glass-pill-btn:hover {
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    .glass-pill-btn:active {
+      transform: scale(0.96);
+    }
+
+    .glass-pill-btn .material-symbols-outlined {
+      font-size: 1.2rem;
+      line-height: 1;
+      color: white;
+    }
+
+    .pill-divider {
+      width: 1px;
+      height: 20px;
+      background: rgba(255, 255, 255, 0.25);
+      margin: 0 2px;
+    }
+
+    .camera-card {
+      position: relative;
+      width: 100%;
+      min-height: 630px;
+      border-radius: 28px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 20% 20%, rgba(255,255,255,0.14), transparent 28%),
+        radial-gradient(circle at 80% 30%, rgba(255,255,255,0.08), transparent 26%),
+        linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02));
+      box-shadow:
+        inset 0 1px 1px rgba(255, 255, 255, 0.35),
+        0 12px 28px rgba(0, 0, 0, 0.22);
+      border: 1px solid rgba(255,255,255,0.12);
+      cursor: pointer;
+    }
+
+    .camera-preview {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #0e0f12;
+      display: none;
+    }
+
+    .camera-overlay-card {
+      position: absolute;
+      inset: 0;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      background:
+        linear-gradient(180deg, rgba(0,0,0,0.26) 0%, rgba(0,0,0,0.06) 30%, rgba(0,0,0,0.22) 100%);
+    }
+
+    .camera-card-top {
+      display: flex;
+      justify-content: flex-end;
+      align-items: flex-start;
+    }
+
+    .expand-pill {
+      height: 40px;
+      min-width: 40px;
+      padding: 0 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.18);
+      backdrop-filter: blur(16px) saturate(160%);
+      -webkit-backdrop-filter: blur(16px) saturate(160%);
+      box-shadow:
+        inset 0 1px 1px rgba(255,255,255,0.45),
+        0 8px 24px rgba(31, 35, 43, 0.14);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      color: white;
+    }
+
+    .expand-pill .material-symbols-outlined {
+      font-size: 1.1rem;
+      line-height: 1;
+    }
+
+    .camera-card-bottom {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      align-items: flex-start;
+    }
+
+    .camera-copy {
+      max-width: 260px;
+    }
+
+    .camera-copy h2 {
+      margin: 0 0 6px;
+      font-size: 1.35rem;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+    }
+
+    .camera-copy p {
+      margin: 0;
+      font-size: 0.92rem;
+      line-height: 1.5;
+      color: rgba(255,255,255,0.84);
+    }
+
+    .camera-card {
+  position: relative;
+  width: 100%;
+  min-height: 630px;
+  border-radius: 28px;
+  overflow: hidden;
+  cursor: pointer;
+
+  background: rgba(255, 255, 255, 0.22);
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.55),
+    0 8px 24px rgba(31, 35, 43, 0.10);
+
+  border: 1px solid rgba(255, 255, 255, 0.14);
+
+  transition:
+    transform 0.24s ease,
+    box-shadow 0.24s ease,
+    background 0.24s ease;
+}
+
+.camera-card:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.55),
+    0 12px 28px rgba(31, 35, 43, 0.16);
+}
+
+.camera-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.18),
+    rgba(255, 255, 255, 0.04)
+  );
+  pointer-events: none;
+  z-index: 1;
+}
+
+.camera-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: none;
+  z-index: 0;
+  opacity: 0.82;
+  filter: saturate(0.95) contrast(1.02);
+}
+
+.camera-overlay-card {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.14) 0%,
+    rgba(0, 0, 0, 0.04) 32%,
+    rgba(0, 0, 0, 0.18) 100%
+  );
+}
+
+    .live-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.16);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ff6161;
+      box-shadow: 0 0 10px rgba(255, 97, 97, 0.75);
+    }
+
+    .full-camera {
+      position: absolute;
+      inset: 0;
+      z-index: 60;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.28s ease;
+      background: #000;
+    }
+
+    .full-camera.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .full-video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #0b0c0f;
+    }
+
+    .full-overlay {
+      position: absolute;
+      inset: 0;
+      padding: 18px 16px 96px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      background:
+        linear-gradient(180deg, rgba(0,0,0,0.34) 0%, rgba(0,0,0,0.08) 28%, rgba(0,0,0,0.2) 100%);
+    }
+
+    .full-left {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .full-right {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    .floating-icon-btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.18);
+      backdrop-filter: blur(16px) saturate(160%);
+      -webkit-backdrop-filter: blur(16px) saturate(160%);
+      box-shadow:
+        inset 0 1px 1px rgba(255,255,255,0.45),
+        0 8px 24px rgba(31, 35, 43, 0.16);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      cursor: pointer;
+      transition:
+        transform 0.24s cubic-bezier(.22, 1, .36, 1),
+        background 0.24s ease,
+        opacity 0.24s ease;
+      position: relative;
+    }
+
+    .floating-icon-btn:hover {
+      background: rgba(255,255,255,0.24);
+    }
+
+    .floating-icon-btn:active {
+      transform: scale(0.96);
+    }
+
+    .floating-icon-btn .material-symbols-outlined {
+      font-size: 1.2rem;
+      line-height: 1;
+      color: white;
+    }
+
+    .floating-icon-btn.off::after {
+      content: "";
+      position: absolute;
+      width: 28px;
+      height: 2px;
+      background: #ff6e6e;
+      border-radius: 999px;
+      transform: rotate(-45deg);
+      box-shadow: 0 0 8px rgba(255,110,110,0.55);
+    }
+
+    .floating-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    .tooltip-label {
+      min-width: 78px;
+      padding: 8px 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.14);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-align: center;
+      color: rgba(255,255,255,0.92);
+      display: none;
+    }
+
+    .floating-stack.active-label .tooltip-label {
+      display: block;
+    }
+
+    .text-chat-panel {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      bottom: 88px;
+      z-index: 65;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(16px);
+      transition:
+        opacity 0.25s ease,
+        transform 0.25s ease;
+    }
+
+    .text-chat-panel.active {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+
+    .text-chat-inner {
+      border-radius: 24px;
+      background: rgba(17, 18, 22, 0.68);
+      backdrop-filter: blur(20px) saturate(165%);
+      -webkit-backdrop-filter: blur(20px) saturate(165%);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.12),
+        0 10px 28px rgba(0,0,0,0.28);
+      border: 1px solid rgba(255,255,255,0.10);
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .text-chat-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .text-chat-top h3 {
+      margin: 0;
+      font-size: 0.96rem;
+      color: white;
+    }
+
+    .mini-pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.12);
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: rgba(255,255,255,0.9);
+    }
+
+    .text-chat-input-wrap {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    .text-chat-input {
+      flex: 1;
+      min-height: 48px;
+      max-height: 120px;
+      resize: none;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.08);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.08);
+      padding: 12px 14px;
+      outline: none;
+    }
+
+    .text-chat-input::placeholder {
+      color: rgba(255,255,255,0.5);
+    }
+
+    .send-btn {
+      width: 46px;
+      height: 46px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.16);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      box-shadow:
+        inset 0 1px 1px rgba(255,255,255,0.25),
+        0 8px 20px rgba(0,0,0,0.22);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      cursor: pointer;
+    }
+
+    .accessibility-menu {
+      position: absolute;
+      top: 12px;
+      right: 54px;
+      min-width: 170px;
+      border-radius: 18px;
+      padding: 10px;
+      background: rgba(17, 18, 22, 0.82);
+      backdrop-filter: blur(20px) saturate(165%);
+      -webkit-backdrop-filter: blur(20px) saturate(165%);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.10),
+        0 10px 28px rgba(0,0,0,0.30);
+      border: 1px solid rgba(255,255,255,0.10);
+      display: none;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      z-index: 10;
+    }
+
+    .accessibility-menu.active {
+      display: grid;
+    }
+
+    .accessibility-option {
+      width: 100%;
+      min-height: 40px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.07);
+      color: white;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 12px;
+      cursor: pointer;
+    }
+
+    .accessibility-option span:last-child {
+      font-size: 0.72rem;
+      color: rgba(255,255,255,0.68);
+    }
+
+    .bottom-nav {
+      position: absolute;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 240px;
+      height: 58px;
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+      backdrop-filter: blur(28px) saturate(190%);
+      -webkit-backdrop-filter: blur(28px) saturate(190%);
+      /* border: 1px solid rgba(255, 255, 255, 0.3); */
+      box-shadow:
+        inset 0 1px 1px rgba(255, 255, 255, 0.65),
+        inset 0 -1px 1px rgba(255, 255, 255, 0.2),
+        0 10px 30px rgba(0, 0, 0, 0.12);
+      z-index: 40;
+      transition: all 0.35s cubic-bezier(.22, 1, .36, 1);
+    }
+
+    .bottom-nav::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background: linear-gradient(
+        to bottom,
+        rgba(255, 255, 255, 0.45),
+        rgba(255, 255, 255, 0.08)
+      );
+      pointer-events: none;
+    }
+
+    .nav-item {
+      width: 58px;
+      height: 40px;
+      border-radius: 50%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      text-decoration: none;
+      position: relative;
+      z-index: 1;
+    }
+
+    .nav-icon-wrap {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      transition:
+        background 0.25s ease,
+        box-shadow 0.25s ease,
+        transform 0.25s ease;
+    }
+
+    .nav-icon-wrap .material-symbols-outlined {
+      color: rgba(255, 255, 255, 0.88);
+      font-size: 22px;
+      line-height: 1;
+      transition: color 0.25s ease;
+    }
+
+    .nav-item:hover .nav-icon-wrap {
+      transform: translateY(-1px);
+    }
+
+    .nav-item.active .nav-icon-wrap {
+      background: rgba(35, 40, 50, 0.15);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow:
+        inset 0 1px 2px rgba(255, 255, 255, 0.18),
+        0 6px 16px rgba(0, 0, 0, 0.25);
+    }
+
+    .nav-item.active .material-symbols-outlined {
+      color: #ffffff;
+    }
+
+    @media (max-width: 420px) {
+      .app-shell {
+        padding: 0;
+      }
+
+      .phone {
+        width: 100%;
+        max-width: none;
+        height: 100vh;
+        border-radius: 0;
+      }
+
+      .camera-card {
+        min-height: calc(100vh - 168px);
+      }
+
+      .text-chat-panel {
+        bottom: 82px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="phone">
+      <main class="page" id="videoPage">
+        <div class="screen-inner">
+          <div class="video-page">
+            <header class="topbar">
+              <h1 class="topbar-title">Interact.</h1>
+
+              <div class="topbar-actions-pill">
+                <button type="button" class="glass-pill-btn" aria-label="Share">
+                  <span class="material-symbols-outlined">share</span>
+                </button>
+
+                <span class="pill-divider"></span>
+
+                <button type="button" class="glass-pill-btn" aria-label="More options">
+                  <span class="material-symbols-outlined">more_horiz</span>
+                </button>
+              </div>
+            </header>
+
+            <section class="camera-card" id="cameraCard" aria-label="Open live camera">
+              <video class="camera-preview" id="cameraPreview" autoplay playsinline muted></video>
+
+              <div class="camera-overlay-card">
+                <div class="camera-card-top">
+                  <div class="expand-pill">
+                    <span class="material-symbols-outlined">open_in_full</span>
+                  </div>
+                </div>
+
+                <div class="camera-card-bottom">
+
+                  <div class="camera-copy">
+                    <h2>Tap to start conversation.</h2>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </main>
+
+      <section class="full-camera" id="fullCamera">
+        <video class="full-video" id="fullVideo" autoplay playsinline muted></video>
+
+        <div class="full-overlay">
+          <div class="full-left">
+            <button type="button" class="floating-icon-btn" id="closeFullCamera" aria-label="Close full screen video">
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+
+          <div class="full-right">
+            <div class="floating-stack">
+              <div class="tooltip-label">Video</div>
+              <button type="button" class="floating-icon-btn" id="videoToggleBtn" aria-label="Toggle video">
+                <span class="material-symbols-outlined">videocam</span>
+              </button>
+            </div>
+
+            <div class="floating-stack">
+              <div class="tooltip-label">Audio</div>
+              <button type="button" class="floating-icon-btn" id="audioToggleBtn" aria-label="Toggle audio">
+                <span class="material-symbols-outlined">mic</span>
+              </button>
+            </div>
+
+            <div class="floating-stack">
+              <div class="tooltip-label">Text</div>
+              <button type="button" class="floating-icon-btn" id="textToggleBtn" aria-label="Open text input">
+                <span class="material-symbols-outlined">text_fields</span>
+              </button>
+            </div>
+
+            <div class="floating-stack" id="moreStack">
+              <div class="tooltip-label">More</div>
+              <div style="position: relative;">
+                <button type="button" class="floating-icon-btn" id="moreToggleBtn" aria-label="Accessibility and more options">
+                  <span class="material-symbols-outlined">more_horiz</span>
+                </button>
+
+                <div class="accessibility-menu" id="accessibilityMenu">
+                  <button type="button" class="accessibility-option">
+                    <span>Captions</span>
+                    <span>On</span>
+                  </button>
+                  <button type="button" class="accessibility-option">
+                    <span>High contrast</span>
+                    <span>Off</span>
+                  </button>
+                  <button type="button" class="accessibility-option">
+                    <span>Voice feedback</span>
+                    <span>On</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="text-chat-panel" id="textChatPanel">
+          <div class="text-chat-inner">
+            <div class="text-chat-top">
+              <h3>Chat with live agent</h3>
+              <span class="mini-pill">Text input</span>
+            </div>
+
+            <div class="text-chat-input-wrap">
+              <textarea
+                class="text-chat-input"
+                id="textChatInput"
+                placeholder="Ask about what the camera sees..."
+                rows="1"
+              ></textarea>
+
+              <button type="button" class="send-btn" aria-label="Send message">
+                <span class="material-symbols-outlined">arrow_upward</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <nav class="bottom-nav" id="bottomNav">
+        <a class="nav-item" href="home.html" aria-label="Home">
+          <div class="nav-icon-wrap">
+            <span class="material-symbols-outlined">home</span>
+          </div>
+        </a>
+
+        <a class="nav-item" href="audio.html" aria-label="Audio">
+          <div class="nav-icon-wrap">
+            <span class="material-symbols-outlined">mic</span>
+          </div>
+        </a>
+
+        <a class="nav-item active" href="video.html" aria-label="Video">
+          <div class="nav-icon-wrap">
+            <span class="material-symbols-outlined">videocam</span>
+          </div>
+        </a>
+
+        <a class="nav-item" href="news.html" aria-label="News">
+          <div class="nav-icon-wrap">
+            <span class="material-symbols-outlined">article</span>
+          </div>
+        </a>
+      </nav>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const cameraCard = document.getElementById("cameraCard");
+      const fullCamera = document.getElementById("fullCamera");
+      const closeFullCamera = document.getElementById("closeFullCamera");
+      const fullVideo = document.getElementById("fullVideo");
+      const cameraPreview = document.getElementById("cameraPreview");
+
+      const videoToggleBtn = document.getElementById("videoToggleBtn");
+      const audioToggleBtn = document.getElementById("audioToggleBtn");
+      const textToggleBtn = document.getElementById("textToggleBtn");
+      const moreToggleBtn = document.getElementById("moreToggleBtn");
+
+      const textChatPanel = document.getElementById("textChatPanel");
+      const textChatInput = document.getElementById("textChatInput");
+      const accessibilityMenu = document.getElementById("accessibilityMenu");
+
+      let mediaStream = null;
+      let videoEnabled = true;
+      let audioEnabled = true;
+
+      async function startCamera() {
+        try {
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" },
+            audio: true
+          });
+
+          if (cameraPreview) cameraPreview.srcObject = mediaStream;
+          if (fullVideo) fullVideo.srcObject = mediaStream;
+
+          cameraPreview.style.display = "block";
+          fullCamera.classList.add("active");
+        } catch (error) {
+          console.error("Camera access error:", error);
+          alert("Camera or microphone access could not be started in this browser.");
+        }
+      }
+
+      function stopCamera() {
+        if (mediaStream) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          mediaStream = null;
+        }
+
+        if (cameraPreview) cameraPreview.srcObject = null;
+        if (fullVideo) fullVideo.srcObject = null;
+
+        if (cameraPreview) cameraPreview.style.display = "none";
+        fullCamera.classList.remove("active");
+        textChatPanel.classList.remove("active");
+        accessibilityMenu.classList.remove("active");
+
+        videoEnabled = true;
+        audioEnabled = true;
+        videoToggleBtn.classList.remove("off");
+        audioToggleBtn.classList.remove("off");
+      }
+
+      function updateTrackStates() {
+        if (!mediaStream) return;
+
+        const videoTracks = mediaStream.getVideoTracks();
+        const audioTracks = mediaStream.getAudioTracks();
+
+        videoTracks.forEach((track) => {
+          track.enabled = videoEnabled;
+        });
+
+        audioTracks.forEach((track) => {
+          track.enabled = audioEnabled;
+        });
+
+        videoToggleBtn.classList.toggle("off", !videoEnabled);
+        audioToggleBtn.classList.toggle("off", !audioEnabled);
+      }
+
+      function autoGrowTextarea(el) {
+        el.style.height = "48px";
+        el.style.height = Math.min(el.scrollHeight, 120) + "px";
+      }
+
+      cameraCard.addEventListener("click", async () => {
+        await startCamera();
+      });
+
+      closeFullCamera.addEventListener("click", () => {
+        stopCamera();
+      });
+
+      videoToggleBtn.addEventListener("click", () => {
+        videoEnabled = !videoEnabled;
+        updateTrackStates();
+      });
+
+      audioToggleBtn.addEventListener("click", () => {
+        audioEnabled = !audioEnabled;
+        updateTrackStates();
+      });
+
+      textToggleBtn.addEventListener("click", () => {
+        textChatPanel.classList.toggle("active");
+
+        if (textChatPanel.classList.contains("active")) {
+          setTimeout(() => {
+            textChatInput.focus();
+            autoGrowTextarea(textChatInput);
+          }, 150);
+        }
+      });
+
+      moreToggleBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        accessibilityMenu.classList.toggle("active");
+      });
+
+      document.addEventListener("click", (e) => {
+        if (!accessibilityMenu.contains(e.target) && !moreToggleBtn.contains(e.target)) {
+          accessibilityMenu.classList.remove("active");
+        }
+      });
+
+      textChatInput.addEventListener("input", () => {
+        autoGrowTextarea(textChatInput);
+      });
+
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && fullCamera.classList.contains("active")) {
+          stopCamera();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

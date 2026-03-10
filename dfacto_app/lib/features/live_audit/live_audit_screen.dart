@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/widgets/glass_container.dart';
 import '../../navigation/app_shell.dart';
 import 'models/fact_check_result.dart';
 import 'services/native_stt_service.dart';
@@ -244,42 +245,42 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
                   border: Border.all(color: context.border, width: 1),
                 ),
                 child: Row(
-                  children: [
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: _isModelDownloading
-                            ? Row(
-                                children: [
-                                  const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Text(
-                                    'Downloading AI model…',
-                                    style: DfactoTextStyles.bodySmall(context.textMuted),
-                                  ),
-                                ],
-                              )
-                            : WaveformVisualizer(isActive: _isListening),
+                    children: [
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: _isModelDownloading
+                              ? Row(
+                                  children: [
+                                    const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Text(
+                                      'Downloading AI model…',
+                                      style: DfactoTextStyles.bodySmall(context.textMuted),
+                                    ),
+                                  ],
+                                )
+                              : WaveformVisualizer(isActive: _isListening),
+                        ),
                       ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(right: 16),
-                      child: _isModelDownloading || _isStopping
-                          ? const SizedBox(
-                              width: 44,
-                              height: 44,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : ListenButton(
-                              isListening: _isListening,
-                              onTap: _toggleListening,
-                            ),
-                    ),
-                  ],
+                      Padding(
+                        padding: const EdgeInsets.only(right: 16),
+                        child: _isModelDownloading || _isStopping
+                            ? const SizedBox(
+                                width: 44,
+                                height: 44,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : ListenButton(
+                                isListening: _isListening,
+                                onTap: _toggleListening,
+                              ),
+                      ),
+                    ],
                 ),
               ),
             ),
@@ -310,15 +311,11 @@ class _LiveAuditScreenState extends State<LiveAuditScreen> {
 
             Expanded(
               flex: 3,
-              child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 20),
-                decoration: BoxDecoration(
-                  color: context.surfaceHigh,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: context.border, width: 1),
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: GlassContainer(
+                  borderRadius: 28,
+                  opacity: context.isDark ? 0.07 : 0.55,
                   child: LiveTranscriptPanel(
                     committedText: _committedText,
                     partialText: _partialText,

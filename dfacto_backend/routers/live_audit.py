@@ -179,10 +179,22 @@ async def _fact_check_and_send(
         if not claim:
             continue
 
+        # Primary duplicate check: LLM flagged it as semantically identical to a
+        # recent claim using the history snapshot passed at extract time.
         if claim_obj.get("is_duplicate", False):
-            logger.info("Duplicate claim — silently discarded: %r", claim[:100])
+            logger.info("Duplicate claim (LLM) — silently discarded: %r", claim[:100])
             continue
 
+        # Secondary duplicate guard: history may have been updated by a concurrent
+        # _fact_check_and_send task between when we snapshotted history.recent() and
+        # now. Re-check the live list with an exact-match to prevent the same claim
+        # being dispatched twice across parallel topic blocks.
+        if any(c.lower() == claim.lower() for c in history.recent()):
+            logger.info("Duplicate claim (race guard) — silently discarded: %r", claim[:100])
+            continue
+
+        # Claim is genuinely new — add to history NOW (before the async dispatch)
+        # so any other concurrent task will see it immediately and won't re-dispatch.
         history.add(claim)
         logger.info("Claim → pipeline: %r", claim[:100])
 
@@ -224,6 +236,8 @@ async def _run_segmentation_cycle(
     websocket: WebSocket,
     pending_tasks: set[asyncio.Task],
     history: ClaimHistory,
+    *,
+    is_closing: bool = False,
 ) -> None:
     """
     Single segmentation cycle:
@@ -231,6 +245,8 @@ async def _run_segmentation_cycle(
     2. Route each block:
        - COMPLETED → fire-and-forget fact-check task
        - ONGOING   → prepend back into the buffer
+                     (if is_closing=True, forced to COMPLETED so the last
+                      sentence is never silently dropped on stop)
     """
     session_ctx = buffer.session_context()
 
@@ -245,12 +261,20 @@ async def _run_segmentation_cycle(
     ongoing_count = sum(1 for b in blocks if not b.is_completed)
     completed_count = len(blocks) - ongoing_count
     logger.info(
-        "Segmentation result: %d block(s) — %d COMPLETED, %d ONGOING",
+        "Segmentation result: %d block(s) — %d COMPLETED, %d ONGOING%s",
         len(blocks), completed_count, ongoing_count,
+        " (session closing — ONGOING blocks will be force-completed)" if is_closing and ongoing_count else "",
     )
 
     for block in blocks:
-        if block.is_completed:
+        if block.is_completed or is_closing:
+            if not block.is_completed:
+                # Session is closing — the speaker was mid-sentence when stop was hit.
+                # Override the ONGOING label so the final thought isn't silently dropped.
+                logger.info(
+                    "Session closing — forcing ONGOING topic %r (%d words) → COMPLETED",
+                    block.topic_label, block.word_count,
+                )
             task = asyncio.create_task(
                 _fact_check_and_send(block.text, session_ctx, websocket, history)
             )
@@ -303,10 +327,14 @@ async def _pump_transcript(
     if buffer.has_buffer_content:
         chunk = buffer.flush()
         logger.info(
-            "Final flush on stop (%d words) — running topic segmentation",
+            "Final flush on stop (%d words) — running topic segmentation (closing mode)",
             len(chunk.split()),
         )
-        await _run_segmentation_cycle(chunk, buffer, websocket, pending_tasks, history)
+        # is_closing=True forces any ONGOING block → COMPLETED so the last
+        # sentence is never silently dropped when the connection closes.
+        await _run_segmentation_cycle(
+            chunk, buffer, websocket, pending_tasks, history, is_closing=True
+        )
 
 
 # ── Layer 1: WebSocket ingestor ───────────────────────────────────────────────

@@ -1,9 +1,11 @@
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/theme/app_theme.dart';
 import '../core/theme/theme_notifier.dart';
 import '../features/live_audit/live_audit_screen.dart';
 import '../features/interactive/interactive_stub_screen.dart';
+import '../features/news/news_screen.dart';
 
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key});
@@ -19,7 +21,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     LiveAuditScreen(),
     InteractiveStubScreen(),
     ScannerStubScreen(),
-    RadarStubScreen(),
+    NewsScreen(),
   ];
 
   void _onDestinationSelected(int index) {
@@ -29,6 +31,7 @@ class _AppShellState extends ConsumerState<AppShell> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      extendBody: true,
       body: AnimatedSwitcher(
         duration: const Duration(milliseconds: 250),
         switchInCurve: Curves.easeOutCubic,
@@ -38,40 +41,91 @@ class _AppShellState extends ConsumerState<AppShell> {
           child: _screens[_selectedIndex],
         ),
       ),
-      bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          border: Border(
-            top: BorderSide(color: context.border, width: 0.5),
+      bottomNavigationBar: _FloatingNavBar(
+        selectedIndex: _selectedIndex,
+        onDestinationSelected: _onDestinationSelected,
+      ),
+    );
+  }
+}
+
+// ─── Floating Glass Nav Bar ────────────────────────────────────────────────────
+class _FloatingNavBar extends StatelessWidget {
+  const _FloatingNavBar({
+    required this.selectedIndex,
+    required this.onDestinationSelected,
+  });
+
+  final int selectedIndex;
+  final ValueChanged<int> onDestinationSelected;
+
+  static const _destinations = [
+    (icon: Icons.radio_button_unchecked_rounded, selectedIcon: Icons.radio_button_checked_rounded, label: 'Live Audit'),
+    (icon: Icons.chat_bubble_outline_rounded, selectedIcon: Icons.chat_bubble_rounded, label: 'Interactive'),
+    (icon: Icons.document_scanner_outlined, selectedIcon: Icons.document_scanner_rounded, label: 'Scanner'),
+    (icon: Icons.article_outlined, selectedIcon: Icons.article_rounded, label: 'News'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 24, right: 24, bottom: 24),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(999),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+          child: Container(
+            height: 64,
+            decoration: BoxDecoration(
+              color: context.isDark
+                  ? Colors.white.withValues(alpha: 0.08)
+                  : Colors.black.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: context.isDark
+                    ? Colors.white.withValues(alpha: 0.12)
+                    : Colors.black.withValues(alpha: 0.08),
+                width: 1,
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: List.generate(_destinations.length, (i) {
+                final dest = _destinations[i];
+                final selected = i == selectedIndex;
+                return GestureDetector(
+                  onTap: () => onDestinationSelected(i),
+                  behavior: HitTestBehavior.opaque,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 250),
+                    curve: Curves.easeOutCubic,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: selected ? context.accentSoft : Colors.transparent,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          selected ? dest.selectedIcon : dest.icon,
+                          size: 22,
+                          color: selected ? context.accent : context.textMuted,
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          dest.label,
+                          style: DfactoTextStyles.labelBold(
+                            selected ? context.accent : context.textMuted,
+                          ).copyWith(fontSize: 9),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }),
+            ),
           ),
-        ),
-        child: NavigationBar(
-          selectedIndex: _selectedIndex,
-          onDestinationSelected: _onDestinationSelected,
-          backgroundColor: context.surface,
-          height: 64,
-          animationDuration: const Duration(milliseconds: 300),
-          destinations: const [
-            NavigationDestination(
-              icon: Icon(Icons.radio_button_unchecked_rounded),
-              selectedIcon: Icon(Icons.radio_button_checked_rounded),
-              label: 'Live Audit',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.chat_bubble_outline_rounded),
-              selectedIcon: Icon(Icons.chat_bubble_rounded),
-              label: 'Interactive',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.document_scanner_outlined),
-              selectedIcon: Icon(Icons.document_scanner_rounded),
-              label: 'Scanner',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.radar_outlined),
-              selectedIcon: Icon(Icons.radar_rounded),
-              label: 'Radar',
-            ),
-          ],
         ),
       ),
     );
